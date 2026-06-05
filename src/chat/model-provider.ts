@@ -7,23 +7,60 @@ const BASE_MODELS = [
   "gemini-3.1-flash-lite",
 ];
 
-const grokApiKey = process.env.GROK_API || process.env.GROK_API_KEY || "";
-const isGroq = grokApiKey.startsWith("gsk_");
-
-export const FALLBACK_MODEL_NAME = isGroq ? "llama-3.3-70b-versatile" : "grok-2";
-const baseURL = isGroq ? "https://api.groq.com/openai/v1" : "https://api.x.ai/v1";
-
-const fallbackProvider = createOpenAI({
-  apiKey: grokApiKey,
-  baseURL,
-});
-
 const cooldowns = new Map<string, number>();
 
+let loggedFallbackState = false;
+let providerCache: { key: string; baseURL: string; provider: ReturnType<typeof createOpenAI> } | null = null;
+
+function getFallbackKey(): string {
+  return (
+    process.env.GROK_API ||
+    process.env.GROK_API_KEY ||
+    process.env.XAI_API_KEY ||
+    process.env.GROQ_API_KEY ||
+    ""
+  );
+}
+
+function isGroqKey(key: string): boolean {
+  return key.startsWith("gsk_");
+}
+
+function getFallbackConfig() {
+  const key = getFallbackKey();
+  const groq = isGroqKey(key);
+  const modelName = groq ? "llama-3.3-70b-versatile" : "grok-2";
+  const baseURL = groq ? "https://api.groq.com/openai/v1" : "https://api.x.ai/v1";
+
+  if (!loggedFallbackState) {
+    if (!key) {
+      console.warn("[Model Provider] No Grok/Groq API key detected. Set GROK_API_KEY, XAI_API_KEY or GROQ_API_KEY for fallback.");
+    } else {
+      console.log(`[Model Provider] Fallback provider active: ${groq ? "Groq" : "xAI"} (${modelName})`);
+    }
+    loggedFallbackState = true;
+  }
+
+  return { key, modelName, baseURL, groq };
+}
+
+function getFallbackProvider(apiKey: string, baseURL: string) {
+  if (providerCache && providerCache.key === apiKey && providerCache.baseURL === baseURL) {
+    return providerCache.provider;
+  }
+
+  const provider = createOpenAI({ apiKey, baseURL });
+  providerCache = { key: apiKey, baseURL, provider };
+  return provider;
+}
+
 export function getAvailableModels(): string[] {
+  const { key, modelName } = getFallbackConfig();
+
   const models = [...BASE_MODELS];
-  if (grokApiKey) {
-    models.push(FALLBACK_MODEL_NAME);
+  if (key) {
+    // Keep Gemini primary but move fallback right after first choice for quick failover.
+    models.splice(1, 0, modelName);
   }
 
   const now = Date.now();
@@ -56,8 +93,16 @@ export function getModelInstance(modelName: string) {
   if (modelName.startsWith("gemini-")) {
     return google(modelName);
   }
-  if (modelName === FALLBACK_MODEL_NAME) {
-    return fallbackProvider(modelName);
+
+  const { key, modelName: fallbackModel, baseURL } = getFallbackConfig();
+  if (modelName === fallbackModel && key) {
+    return getFallbackProvider(key, baseURL)(modelName);
   }
+
   throw new Error(`[Model Provider] Unknown model name: ${modelName}`);
+}
+
+export function isFallbackModel(modelName: string): boolean {
+  const { modelName: fallbackModel } = getFallbackConfig();
+  return modelName === fallbackModel;
 }

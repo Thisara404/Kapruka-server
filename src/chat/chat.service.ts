@@ -1,14 +1,161 @@
 import { Injectable, BadRequestException, HttpException, HttpStatus, Logger } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
-import { streamText, tool, convertToModelMessages, stepCountIs } from 'ai';
+import { streamText, tool, stepCountIs } from 'ai';
 import { z } from 'zod';
 import { Conversation, ConversationDocument } from './schemas/conversation.schema';
 import { AnalyticsService } from '../analytics/analytics.service';
 import { callMcpTool } from './mcp-client';
 import { getSystemPrompt } from './system-prompt';
 import { checkRateLimit } from './rate-limiter';
-import { getAvailableModels, markModelFailed, getModelInstance } from './model-provider';
+import { getAvailableModels, markModelFailed, getModelInstance, isFallbackModel } from './model-provider';
+
+/**
+ * Converts a mixed array of UIMessages (parts[]) and ModelMessages (content[])
+ * stored in the DB into a clean ModelMessage[] array that `streamText` accepts.
+ *
+ * UIMessage format  — produced by the frontend / @ai-sdk/react
+ *   { role: "user"|"assistant", parts: [...] }
+ *
+ * ModelMessage format — produced by onFinish → response.messages
+ *   { role: "user"|"assistant"|"tool", content: string | [...] }
+ */
+function toModelMessages(messages: any[]): any[] {
+  const result: any[] = [];
+
+  for (const msg of messages) {
+    const role: string = msg?.role;
+    if (!role || role === 'system') continue;
+
+    // ── User ──────────────────────────────────────────────────────────────────
+    if (role === 'user') {
+      let text = '';
+      if (typeof msg.content === 'string') {
+        text = msg.content;
+      } else if (Array.isArray(msg.content)) {
+        text = msg.content
+          .filter((c: any) => c?.type === 'text')
+          .map((c: any) => c.text ?? '')
+          .join('');
+      } else if (Array.isArray(msg.parts)) {
+        text = msg.parts
+          .filter((p: any) => p?.type === 'text')
+          .map((p: any) => p.text ?? '')
+          .join('');
+      }
+      const trimmed = text.trim();
+      if (trimmed) {
+        result.push({ role: 'user', content: trimmed });
+      }
+      continue;
+    }
+
+    // ── Assistant ─────────────────────────────────────────────────────────────
+    if (role === 'assistant') {
+      const source: any[] = Array.isArray(msg.parts)
+        ? msg.parts
+        : Array.isArray(msg.content)
+        ? msg.content
+        : [];
+
+      const assistantContent: any[] = [];
+      const pendingToolResults: any[] = [];
+
+      for (const part of source) {
+        if (!part?.type) continue;
+
+        // Plain text
+        if (part.type === 'text') {
+          const t = (part.text ?? '').trim();
+          if (t) assistantContent.push({ type: 'text', text: t });
+          continue;
+        }
+
+        // ModelMessage tool-call (from response.messages)
+        if (part.type === 'tool-call' && part.toolCallId) {
+          assistantContent.push({
+            type: 'tool-call',
+            toolCallId: part.toolCallId,
+            toolName: part.toolName ?? '',
+            input: part.input ?? part.args ?? {},
+            // providerExecuted must be boolean or absent — never null
+            ...(typeof part.providerExecuted === 'boolean' ? { providerExecuted: part.providerExecuted } : {}),
+            ...(part.providerOptions ? { providerOptions: part.providerOptions } : {}),
+          });
+          continue;
+        }
+
+        // UIMessage tool-invocation (from frontend)
+        if (part.type === 'tool-invocation' && part.toolCallId) {
+          assistantContent.push({
+            type: 'tool-call',
+            toolCallId: part.toolCallId,
+            toolName: part.toolName ?? '',
+            input: part.args ?? part.input ?? {},
+          });
+          // If the invocation carries the result, collect it for a tool role message
+          if (part.state === 'result' && part.result !== undefined) {
+            pendingToolResults.push({
+              type: 'tool-result',
+              toolCallId: part.toolCallId,
+              toolName: part.toolName ?? '',
+              output: { type: 'json', value: part.result },
+            });
+          }
+          continue;
+        }
+
+        // Reasoning part (some models emit these)
+        if (part.type === 'reasoning' && typeof part.text === 'string') {
+          assistantContent.push({ type: 'reasoning', text: part.text });
+          continue;
+        }
+
+        // Skip: step-start, source, tool-approval-request, etc.
+      }
+
+      if (assistantContent.length > 0) {
+        result.push({ role: 'assistant', content: assistantContent });
+        if (pendingToolResults.length > 0) {
+          result.push({ role: 'tool', content: pendingToolResults });
+        }
+      }
+      continue;
+    }
+
+    // ── Tool (ModelMessage format, from response.messages) ───────────────────
+    if (role === 'tool') {
+      if (!Array.isArray(msg.content)) continue;
+
+      const toolResults: any[] = [];
+      for (const part of msg.content) {
+        if (part?.type !== 'tool-result' || !part.toolCallId) continue;
+
+        const rawOutput = part.output ?? part.result;
+        let output: any;
+        if (rawOutput && typeof rawOutput === 'object' && typeof rawOutput.type === 'string') {
+          // Already in { type, value } format — keep as-is
+          output = rawOutput;
+        } else {
+          output = { type: 'json', value: rawOutput ?? null };
+        }
+
+        toolResults.push({
+          type: 'tool-result',
+          toolCallId: part.toolCallId,
+          toolName: part.toolName ?? '',
+          output,
+        });
+      }
+      if (toolResults.length > 0) {
+        result.push({ role: 'tool', content: toolResults });
+      }
+      continue;
+    }
+  }
+
+  return result;
+}
 
 @Injectable()
 export class ChatService {
@@ -150,7 +297,12 @@ export class ChatService {
       }).catch(() => {});
     }
 
-    const converted = await convertToModelMessages(messages);
+    // ── Convert the mixed message history to clean ModelMessages ──────────────
+    // The DB stores a mix of:
+    //   • UIMessages  (role user/assistant with `parts[]` — sent by the frontend)
+    //   • ModelMessages (role assistant/tool with `content[]` — saved from response.messages in onFinish)
+    // `convertToModelMessages` only accepts UIMessages, so we build ModelMessages ourselves.
+    const converted = toModelMessages(messages);
 
     // Save initial message history
     if (sessionId) {
@@ -170,6 +322,7 @@ export class ChatService {
           model: getModelInstance(modelName),
           system: getSystemPrompt(),
           messages: converted,
+          maxRetries: isFallbackModel(modelName) ? 1 : 2,
           tools: {
             // ─── Search Products ──────────────────────────────
             kapruka_search_products: tool({
@@ -459,7 +612,15 @@ export class ChatService {
                 } else {
                   controller.enqueue(value);
                 }
-              } catch (err) {
+              } catch (err: any) {
+                const errMsg = String(err?.message || err || 'stream error');
+                const isCapacityError = errMsg.includes('high demand') || errMsg.includes('503') || errMsg.includes('UNAVAILABLE');
+                if (isCapacityError) {
+                  // This error happens after streaming has started (during tool steps),
+                  // so model-loop fallback cannot trigger for this request. We still
+                  // mark cooldown so the next request uses fallback model immediately.
+                  markModelFailed(modelName, 180000);
+                }
                 controller.error(err);
                 reader.releaseLock();
               }
@@ -497,5 +658,80 @@ export class ChatService {
 
     this.logger.log(`Successfully streaming response using model: ${successfulModel}`);
     return streamResult;
+  }
+
+  async listDeliveryCities(query?: string, limit = 20): Promise<any[]> {
+    const params: Record<string, any> = { response_format: 'json', limit };
+    if (query) params.query = query;
+    const result = await callMcpTool('kapruka_list_delivery_cities', { params });
+    return Array.isArray(result) ? result : [];
+  }
+
+  async createQuickOrder(
+    body: {
+      cart: { product_id: string; quantity: number; icing_text?: string }[];
+      recipient: { name: string; phone: string };
+      delivery: { address: string; city: string; location_type: string; date: string; instructions?: string };
+      sender: { name: string; anonymous: boolean };
+      gift_message?: string;
+    },
+    sessionId: string | undefined,
+    userId: string | undefined,
+    ipAddress: string,
+  ): Promise<any> {
+    const params: Record<string, any> = { response_format: 'json', ...body };
+    const result = await callMcpTool('kapruka_create_order', { params });
+
+    if (result?.checkout_url) {
+      // Persist a synthetic confirmation message into conversation history
+      if (sessionId) {
+        const toolCallId = `quick-order-${Date.now()}`;
+        const confirmMessages = [
+          {
+            id: toolCallId + '-user',
+            role: 'user',
+            parts: [{ type: 'text', text: `Quick order placed for product ${body.cart[0]?.product_id}` }],
+          },
+          {
+            id: toolCallId,
+            role: 'assistant',
+            parts: [
+              { type: 'text', text: `Your order has been placed! 🎉` },
+              { type: 'tool-invocation', toolCallId, toolName: 'kapruka_create_order', state: 'result', result },
+            ],
+          },
+        ];
+
+        const existingMessages = await this.getHistory(sessionId, userId);
+        this.saveMessages(sessionId, [...existingMessages, ...confirmMessages], userId).catch(() => {});
+
+        this.analyticsService.logOrder({
+          sessionId,
+          userId,
+          orderRef: result.order_ref,
+          checkoutUrl: result.checkout_url,
+          cart: body.cart,
+          recipient: body.recipient,
+          delivery: body.delivery,
+          sender: body.sender,
+          summary: {
+            subtotal: result.summary?.items_total || 0,
+            deliveryRate: result.summary?.delivery_fee || 0,
+            total: result.summary?.grand_total || 0,
+          },
+          status: 'created',
+        }).catch(() => {});
+
+        this.analyticsService.logEvent({
+          sessionId,
+          userId,
+          ipAddress,
+          eventName: 'quick_order',
+          metadata: { orderRef: result.order_ref, productId: body.cart[0]?.product_id },
+        }).catch(() => {});
+      }
+    }
+
+    return result;
   }
 }
