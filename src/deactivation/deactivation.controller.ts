@@ -1,6 +1,6 @@
 import { Controller, Post, Body, Req, UseGuards } from '@nestjs/common';
-import { DeactivationService } from './deactivation.service';
-import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { DeactivationService } from './deactivation.service.js';
+import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
 import { IsOptional, IsString } from 'class-validator';
 
 class DeactivateUserDto {

@@ -1,18 +1,21 @@
 import { Module } from '@nestjs/common';
-import { MongooseModule } from '@nestjs/mongoose';
-import { ChatService } from './chat.service';
-import { ChatController } from './chat.controller';
+import { TypeOrmModule } from '@nestjs/typeorm';
+import { ChatService } from './chat.service.js';
+import { ChatController } from './chat.controller.js';
 import {
-  Conversation,
-  ConversationSchema,
-} from './schemas/conversation.schema';
-import { AnalyticsModule } from '../analytics/analytics.module';
-import { AuthModule } from '../auth/auth.module';
+  AgentSessionEntity,
+  AgentTurnEntity,
+  StepTraceEntity,
+} from '../database/entities/index.js';
+import { AnalyticsModule } from '../analytics/analytics.module.js';
+import { AuthModule } from '../auth/auth.module.js';
 
 @Module({
   imports: [
-    MongooseModule.forFeature([
-      { name: Conversation.name, schema: ConversationSchema },
+    TypeOrmModule.forFeature([
+      AgentSessionEntity,
+      AgentTurnEntity,
+      StepTraceEntity,
     ]),
     AnalyticsModule,
     AuthModule,

@@ -1,42 +1,36 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { InjectModel } from '@nestjs/mongoose';
-import { Model } from 'mongoose';
-import { Order, OrderDocument } from './schemas/order.schema';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository, DataSource } from 'typeorm';
 import {
-  ProductView,
-  ProductViewDocument,
-} from './schemas/product-view.schema';
-import {
-  DeliveryCheck,
-  DeliveryCheckDocument,
-} from './schemas/delivery-check.schema';
-import {
-  Analytics,
-  AnalyticsDocument,
-  AnalyticsEvent,
-} from './schemas/analytics.schema';
+  OrderEntity,
+  ProductViewEntity,
+  DeliveryCheckEntity,
+  AnalyticsEntity,
+} from '../database/entities/index.js';
 
 @Injectable()
 export class AnalyticsService {
   private readonly logger = new Logger('AnalyticsService');
 
   constructor(
-    @InjectModel(Order.name) private readonly orderModel: Model<OrderDocument>,
-    @InjectModel(ProductView.name)
-    private readonly productViewModel: Model<ProductViewDocument>,
-    @InjectModel(DeliveryCheck.name)
-    private readonly deliveryCheckModel: Model<DeliveryCheckDocument>,
-    @InjectModel(Analytics.name)
-    private readonly analyticsModel: Model<AnalyticsDocument>,
+    @InjectRepository(OrderEntity)
+    private readonly orderRepo: Repository<OrderEntity>,
+    @InjectRepository(ProductViewEntity)
+    private readonly productViewRepo: Repository<ProductViewEntity>,
+    @InjectRepository(DeliveryCheckEntity)
+    private readonly deliveryCheckRepo: Repository<DeliveryCheckEntity>,
+    @InjectRepository(AnalyticsEntity)
+    private readonly analyticsRepo: Repository<AnalyticsEntity>,
+    private readonly dataSource: DataSource,
   ) {}
 
   async logProductView(data: any): Promise<any> {
     try {
-      const view = new this.productViewModel({
+      const view = this.productViewRepo.create({
         ...data,
         viewedAt: new Date(),
       });
-      return await view.save();
+      return await this.productViewRepo.save(view);
     } catch (err: any) {
       this.logger.warn(`Failed to log product view: ${err.message}`);
     }
@@ -44,11 +38,11 @@ export class AnalyticsService {
 
   async logDeliveryCheck(data: any): Promise<any> {
     try {
-      const check = new this.deliveryCheckModel({
+      const check = this.deliveryCheckRepo.create({
         ...data,
         checkedAt: new Date(),
       });
-      return await check.save();
+      return await this.deliveryCheckRepo.save(check);
     } catch (err: any) {
       this.logger.warn(`Failed to log delivery check: ${err.message}`);
     }
@@ -56,11 +50,11 @@ export class AnalyticsService {
 
   async logOrder(data: any): Promise<any> {
     try {
-      const order = new this.orderModel({
+      const order = this.orderRepo.create({
         ...data,
         createdAt: new Date(),
       });
-      return await order.save();
+      return await this.orderRepo.save(order);
     } catch (err: any) {
       this.logger.warn(`Failed to log order: ${err.message}`);
     }
@@ -74,26 +68,30 @@ export class AnalyticsService {
     metadata?: Record<string, any>;
   }): Promise<any> {
     try {
-      const event: AnalyticsEvent = {
+      const event = {
         name: data.eventName,
-        metadata: data.metadata,
-        timestamp: new Date(),
+        metadata: data.metadata || {},
+        timestamp: new Date().toISOString(),
       };
-      return await this.analyticsModel
-        .updateOne(
-          { sessionId: data.sessionId },
-          {
-            $push: { events: event },
-            $set: {
-              userId: data.userId,
-              ipAddress: data.ipAddress,
-              updatedAt: new Date(),
-            },
-            $setOnInsert: { createdAt: new Date() },
-          },
-          { upsert: true },
-        )
-        .exec();
+
+      const eventJson = JSON.stringify([event]);
+
+      // Atomic ON CONFLICT upsert appending to the events jsonb array
+      return await this.analyticsRepo.query(
+        `INSERT INTO analytics ("sessionId", "userId", "ipAddress", "events", "createdAt", "updatedAt")
+         VALUES ($1, $2, $3, $4::jsonb, now(), now())
+         ON CONFLICT ("sessionId") DO UPDATE SET
+           "userId" = COALESCE(EXCLUDED."userId", analytics."userId"),
+           "ipAddress" = COALESCE(EXCLUDED."ipAddress", analytics."ipAddress"),
+           "events" = analytics.events || EXCLUDED.events,
+           "updatedAt" = now()`,
+        [
+          data.sessionId,
+          data.userId || null,
+          data.ipAddress || null,
+          eventJson,
+        ],
+      );
     } catch (err: any) {
       this.logger.warn(`Failed to log event: ${err.message}`);
     }
@@ -104,18 +102,13 @@ export class AnalyticsService {
       this.logger.log(
         `Migrating session records for ${sessionId} to user ${userId}`,
       );
-      await this.orderModel
-        .updateMany({ sessionId }, { $set: { userId } })
-        .exec();
-      await this.analyticsModel
-        .updateMany({ sessionId }, { $set: { userId } })
-        .exec();
-      await this.productViewModel
-        .updateMany({ sessionId }, { $set: { userId } })
-        .exec();
-      await this.deliveryCheckModel
-        .updateMany({ sessionId }, { $set: { userId } })
-        .exec();
+      // Run updates atomically within a transaction
+      await this.dataSource.transaction(async (manager) => {
+        await manager.update(OrderEntity, { sessionId }, { userId });
+        await manager.update(AnalyticsEntity, { sessionId }, { userId });
+        await manager.update(ProductViewEntity, { sessionId }, { userId });
+        await manager.update(DeliveryCheckEntity, { sessionId }, { userId });
+      });
     } catch (err: any) {
       this.logger.error(`Migration of session records failed: ${err.message}`);
     }
@@ -123,10 +116,13 @@ export class AnalyticsService {
 
   async deleteByUserId(userId: string): Promise<any> {
     try {
-      await this.orderModel.deleteMany({ userId }).exec();
-      await this.analyticsModel.deleteMany({ userId }).exec();
-      await this.productViewModel.deleteMany({ userId }).exec();
-      await this.deliveryCheckModel.deleteMany({ userId }).exec();
+      // Run deletes atomically within a transaction
+      await this.dataSource.transaction(async (manager) => {
+        await manager.delete(OrderEntity, { userId });
+        await manager.delete(AnalyticsEntity, { userId });
+        await manager.delete(ProductViewEntity, { userId });
+        await manager.delete(DeliveryCheckEntity, { userId });
+      });
     } catch (err: any) {
       this.logger.error(`Deletion of user records failed: ${err.message}`);
     }

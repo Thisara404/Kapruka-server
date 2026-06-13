@@ -72,12 +72,13 @@ export function getAvailableModels(): string[] {
   const { key, modelName } = getFallbackConfig();
 
   const models: string[] = [];
+  // Gemini models are the primary models
+  models.push(...BASE_MODELS);
+
   if (key) {
-    // Llama is the primary model
+    // Llama/Grok is the fallback model
     models.push(modelName);
   }
-  // Gemini models are the fallbacks
-  models.push(...BASE_MODELS);
 
   const now = Date.now();
   const available = models.filter((model) => {

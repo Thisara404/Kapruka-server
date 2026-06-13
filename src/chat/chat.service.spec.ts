@@ -1,15 +1,30 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { getModelToken } from '@nestjs/mongoose';
-import { ChatService } from './chat.service';
-import { Conversation } from './schemas/conversation.schema';
-import { AnalyticsService } from '../analytics/analytics.service';
+import { getRepositoryToken } from '@nestjs/typeorm';
+import { ChatService } from './chat.service.js';
+import {
+  AgentSessionEntity,
+  AgentTurnEntity,
+  StepTraceEntity,
+} from '../database/entities/index.js';
+import { AnalyticsService } from '../analytics/analytics.service.js';
 
-// Mock dependencies
-const mockConversationModel = {
-  findOne: jest.fn().mockReturnThis(),
-  exec: jest.fn(),
-  updateOne: jest.fn().mockReturnThis(),
-  deleteMany: jest.fn().mockReturnThis(),
+// Mock repositories
+const mockSessionRepo = {
+  findOne: jest.fn(),
+  save: jest.fn().mockImplementation((val) => Promise.resolve(val)),
+  create: jest.fn().mockImplementation((val) => val),
+  delete: jest.fn().mockResolvedValue({ affected: 1 }),
+};
+
+const mockTurnRepo = {
+  findOne: jest.fn(),
+  save: jest.fn().mockImplementation((val) => Promise.resolve(val)),
+  create: jest.fn().mockImplementation((val) => val),
+};
+
+const mockStepTraceRepo = {
+  save: jest.fn().mockImplementation((val) => Promise.resolve(val)),
+  create: jest.fn().mockImplementation((val) => val),
 };
 
 const mockAnalyticsService = {
@@ -45,8 +60,16 @@ describe('ChatService', () => {
       providers: [
         ChatService,
         {
-          provide: getModelToken(Conversation.name),
-          useValue: mockConversationModel,
+          provide: getRepositoryToken(AgentSessionEntity),
+          useValue: mockSessionRepo,
+        },
+        {
+          provide: getRepositoryToken(AgentTurnEntity),
+          useValue: mockTurnRepo,
+        },
+        {
+          provide: getRepositoryToken(StepTraceEntity),
+          useValue: mockStepTraceRepo,
         },
         {
           provide: AnalyticsService,
@@ -188,12 +211,24 @@ describe('ChatService', () => {
         id: 'u1',
         role: 'user',
         content: 'Hello, search cakes',
+        parts: [{ type: 'text', text: 'Hello, search cakes' }],
         metadata: undefined,
       });
       expect(uiMessages[1]).toEqual({
         id: 'a1',
         role: 'assistant',
         content: 'Sure, searching cakes: ',
+        parts: [
+          { type: 'text', text: 'Sure, searching cakes: ' },
+          {
+            type: 'tool-invocation',
+            toolCallId: 't1',
+            toolName: 'kapruka_search_products',
+            args: { q: 'cake' },
+            state: 'result',
+            result: { results: [] },
+          },
+        ],
         toolInvocations: [
           {
             state: 'result',

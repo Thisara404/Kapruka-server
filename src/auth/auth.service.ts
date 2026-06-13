@@ -1,7 +1,8 @@
 import { Injectable } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcryptjs';
-import { UsersService } from '../users/users.service';
+import { UsersService } from '../users/users.service.js';
+import { UserEntity } from '../database/entities/user.entity.js';
 
 @Injectable()
 export class AuthService {
@@ -21,19 +22,19 @@ export class AuthService {
       const isMatch = await bcrypt.compare(pass, user.password);
       if (isMatch) {
         // Return without password hash
-        const { password, ...result } = user.toObject();
+        const { password, ...result } = user;
         return result;
       }
     }
     return null;
   }
 
-  async login(user: any) {
-    const payload = { email: user.email, sub: user._id.toString() };
+  async login(user: UserEntity) {
+    const payload = { email: user.email, sub: user.id };
     const token = this.jwtService.sign(payload);
     return {
       user: {
-        id: user._id.toString(),
+        id: user.id,
         email: user.email,
         name: user.name,
         image: user.image,
@@ -53,8 +54,9 @@ export class AuthService {
       });
     } else if (profile.image && !user.image) {
       // Update user image if empty
-      user.image = profile.image;
-      await user.save();
+      user = await this.usersService.update(user.id, {
+        image: profile.image,
+      });
     }
 
     return this.login(user);

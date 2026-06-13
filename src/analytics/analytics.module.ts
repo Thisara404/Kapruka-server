@@ -1,24 +1,23 @@
 import { Module } from '@nestjs/common';
-import { MongooseModule } from '@nestjs/mongoose';
-import { AnalyticsService } from './analytics.service';
-import { Order, OrderSchema } from './schemas/order.schema';
-import { ProductView, ProductViewSchema } from './schemas/product-view.schema';
+import { TypeOrmModule } from '@nestjs/typeorm';
+import { AnalyticsService } from './analytics.service.js';
 import {
-  DeliveryCheck,
-  DeliveryCheckSchema,
-} from './schemas/delivery-check.schema';
-import { Analytics, AnalyticsSchema } from './schemas/analytics.schema';
+  OrderEntity,
+  ProductViewEntity,
+  DeliveryCheckEntity,
+  AnalyticsEntity,
+} from '../database/entities/index.js';
 
 @Module({
   imports: [
-    MongooseModule.forFeature([
-      { name: Order.name, schema: OrderSchema },
-      { name: ProductView.name, schema: ProductViewSchema },
-      { name: DeliveryCheck.name, schema: DeliveryCheckSchema },
-      { name: Analytics.name, schema: AnalyticsSchema },
+    TypeOrmModule.forFeature([
+      OrderEntity,
+      ProductViewEntity,
+      DeliveryCheckEntity,
+      AnalyticsEntity,
     ]),
   ],
   providers: [AnalyticsService],
-  exports: [AnalyticsService, MongooseModule],
+  exports: [AnalyticsService, TypeOrmModule],
 })
 export class AnalyticsModule {}

@@ -1,22 +1,17 @@
 import { Module } from '@nestjs/common';
-import { MongooseModule } from '@nestjs/mongoose';
-import { DeactivationService } from './deactivation.service';
-import { DeactivationScheduler } from './deactivation.scheduler';
-import { DeactivationController } from './deactivation.controller';
-import {
-  DeactivatedUser,
-  DeactivatedUserSchema,
-} from './schemas/deactivated-user.schema';
-import { UsersModule } from '../users/users.module';
-import { ChatModule } from '../chat/chat.module';
-import { AnalyticsModule } from '../analytics/analytics.module';
-import { AuthModule } from '../auth/auth.module';
+import { TypeOrmModule } from '@nestjs/typeorm';
+import { DeactivationService } from './deactivation.service.js';
+import { DeactivationScheduler } from './deactivation.scheduler.js';
+import { DeactivationController } from './deactivation.controller.js';
+import { DeactivatedUserEntity } from '../database/entities/index.js';
+import { UsersModule } from '../users/users.module.js';
+import { ChatModule } from '../chat/chat.module.js';
+import { AnalyticsModule } from '../analytics/analytics.module.js';
+import { AuthModule } from '../auth/auth.module.js';
 
 @Module({
   imports: [
-    MongooseModule.forFeature([
-      { name: DeactivatedUser.name, schema: DeactivatedUserSchema },
-    ]),
+    TypeOrmModule.forFeature([DeactivatedUserEntity]),
     UsersModule,
     ChatModule,
     AnalyticsModule,

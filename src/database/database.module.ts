@@ -1,14 +1,14 @@
 import { Module } from '@nestjs/common';
-import { MongooseModule } from '@nestjs/mongoose';
-import { MongooseConfigService } from './mongoose-config.service';
+import { TypeOrmModule } from '@nestjs/typeorm';
+import { TypeOrmConfigService } from './typeorm-config.service.js';
 
 @Module({
   imports: [
-    MongooseModule.forRootAsync({
-      useClass: MongooseConfigService,
+    TypeOrmModule.forRootAsync({
+      useClass: TypeOrmConfigService,
     }),
   ],
-  providers: [MongooseConfigService],
-  exports: [MongooseModule],
+  providers: [TypeOrmConfigService],
+  exports: [TypeOrmModule],
 })
 export class DatabaseModule {}

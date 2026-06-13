@@ -5,24 +5,27 @@ import {
   HttpStatus,
   Logger,
 } from '@nestjs/common';
-import { InjectModel } from '@nestjs/mongoose';
-import { Model } from 'mongoose';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository, IsNull } from 'typeorm';
 import { streamText, tool, stepCountIs, generateText } from 'ai';
 import { z } from 'zod';
 import {
-  Conversation,
-  ConversationDocument,
-} from './schemas/conversation.schema';
-import { AnalyticsService } from '../analytics/analytics.service';
-import { callMcpTool } from './mcp-client';
-import { getSystemPrompt } from './system-prompt';
-import { checkRateLimit } from './rate-limiter';
+  AgentSessionEntity,
+  AgentTurnEntity,
+  StepTraceEntity,
+} from '../database/entities/index.js';
+import { StepType } from '../database/enums/step-type.enum.js';
+import { SessionStatus } from '../database/enums/session-status.enum.js';
+import { AnalyticsService } from '../analytics/analytics.service.js';
+import { callMcpTool } from './mcp-client.js';
+import { getSystemPrompt } from './system-prompt.js';
+import { checkRateLimit } from './rate-limiter.js';
 import {
   getAvailableModels,
   markModelFailed,
   getModelInstance,
   isFallbackModel,
-} from './model-provider';
+} from './model-provider.js';
 
 /**
  * Converts a mixed array of UIMessages (parts[]) and ModelMessages (content[])
@@ -131,6 +134,9 @@ function toModelMessages(messages: any[]): any[] {
             toolName: part.toolName ?? '',
             args: part.args ?? part.input ?? {},
             input: part.args ?? part.input ?? {},
+            ...(part.providerOptions
+              ? { providerOptions: part.providerOptions }
+              : {}),
           });
           // If the invocation carries the result, collect it for a tool role message
           if (part.state === 'result' && part.result !== undefined) {
@@ -207,8 +213,12 @@ export class ChatService {
   private readonly logger = new Logger('ChatService');
 
   constructor(
-    @InjectModel(Conversation.name)
-    private readonly conversationModel: Model<ConversationDocument>,
+    @InjectRepository(AgentSessionEntity)
+    private readonly sessionRepo: Repository<AgentSessionEntity>,
+    @InjectRepository(AgentTurnEntity)
+    private readonly turnRepo: Repository<AgentTurnEntity>,
+    @InjectRepository(StepTraceEntity)
+    private readonly stepTraceRepo: Repository<StepTraceEntity>,
     private readonly analyticsService: AnalyticsService,
   ) {}
 
@@ -346,7 +356,8 @@ export class ChatService {
           id,
           role: 'assistant',
           content,
-          parts: uiParts.length > 0 ? uiParts : [{ type: 'text', text: content }],
+          parts:
+            uiParts.length > 0 ? uiParts : [{ type: 'text', text: content }],
           toolInvocations:
             toolInvocations.length > 0 ? toolInvocations : undefined,
           metadata,
@@ -358,45 +369,156 @@ export class ChatService {
   }
 
   async getHistory(sessionId: string, userId?: string): Promise<any[]> {
-    const doc = await this.conversationModel.findOne({ sessionId }).exec();
-    if (doc) {
-      if (userId && !doc.userId) {
-        this.logger.log(
-          `Migrating anonymous session ${sessionId} to user ${userId}`,
-        );
-        await this.conversationModel
-          .updateOne({ sessionId }, { $set: { userId, type: 'user' } })
-          .exec();
-        // Trigger background analytics migration
-        this.analyticsService.migrateSession(sessionId, userId).catch(() => {});
-      }
-      return this.toUIMessages(doc.messages || []);
+    const session = await this.sessionRepo.findOne({
+      where: { id: sessionId },
+      relations: {
+        turns: {
+          traces: true,
+        },
+      },
+    });
+
+    if (!session) {
+      return [];
     }
-    return [];
+
+    if (userId && !session.externalUserId) {
+      this.logger.log(
+        `Migrating anonymous session ${sessionId} to user ${userId}`,
+      );
+      session.externalUserId = userId;
+      await this.sessionRepo.save(session);
+      // Trigger background analytics migration
+      this.analyticsService.migrateSession(sessionId, userId).catch(() => {});
+    }
+
+    // Sort turns by createdAt to reconstruct messages in correct chronological order
+    const turns = session.turns.sort(
+      (a, b) => a.createdAt.getTime() - b.createdAt.getTime(),
+    );
+
+    const flatMessages: any[] = [];
+    for (const turn of turns) {
+      // 1. Reconstruct User Message
+      flatMessages.push({
+        id: `${turn.id}-user`,
+        role: 'user',
+        content: turn.userPrompt,
+        metadata: turn.metadata,
+      });
+
+      // 2. Reconstruct Tool Calls & Results (if any)
+      const toolCalls: any[] = [];
+      const toolResults: any[] = [];
+
+      // Sort traces by createdAt
+      const traces =
+        turn.traces?.sort(
+          (a, b) => a.createdAt.getTime() - b.createdAt.getTime(),
+        ) || [];
+
+      for (const trace of traces) {
+        if (trace.stepType === StepType.MCP_TOOL_CALL) {
+          const { providerOptions, ...cleanArgs } = trace.inputPayload || {};
+          const toolCallId = cleanArgs.toolCallId || trace.id;
+          toolCalls.push({
+            type: 'tool-call',
+            toolCallId,
+            toolName: trace.nodeName,
+            args: cleanArgs,
+            ...(providerOptions ? { providerOptions } : {}),
+          });
+
+          toolResults.push({
+            type: 'tool-result',
+            toolCallId,
+            toolName: trace.nodeName,
+            result:
+              trace.outputPayload?.value !== undefined
+                ? trace.outputPayload.value
+                : (trace.outputPayload ?? null),
+          });
+        }
+      }
+
+      if (toolCalls.length > 0) {
+        flatMessages.push({
+          id: `${turn.id}-tool-calls`,
+          role: 'assistant',
+          content: toolCalls,
+        });
+        flatMessages.push({
+          id: `${turn.id}-tool-results`,
+          role: 'tool',
+          content: toolResults,
+        });
+      }
+
+      // 3. Reconstruct Assistant Message
+      if (turn.finalAgentResponse) {
+        flatMessages.push({
+          id: `${turn.id}-assistant`,
+          role: 'assistant',
+          content: turn.finalAgentResponse,
+          metadata: {
+            englishText:
+              turn.metadata?.assistantEnglishText ?? turn.finalAgentResponse,
+            originalText: turn.finalAgentResponse,
+          },
+        });
+      }
+    }
+
+    return this.toUIMessages(flatMessages);
   }
 
-  async saveMessages(
+  async findOrCreateSession(
     sessionId: string,
-    messages: any[],
     userId?: string,
-  ): Promise<any> {
-    return this.conversationModel
-      .updateOne(
-        { sessionId },
-        {
-          $set: {
-            messages,
-            userId,
-            type: userId ? 'user' : 'public',
-          },
-        },
-        { upsert: true },
-      )
-      .exec();
+  ): Promise<AgentSessionEntity> {
+    let session = await this.sessionRepo.findOne({ where: { id: sessionId } });
+    if (!session) {
+      session = this.sessionRepo.create({
+        id: sessionId,
+        externalUserId: userId || null,
+        currentStatus: SessionStatus.ACTIVE,
+      });
+      session = await this.sessionRepo.save(session);
+    }
+    return session;
+  }
+
+  async saveInitialTurn(
+    sessionId: string,
+    userPrompt: string,
+    metadata: any,
+  ): Promise<AgentTurnEntity> {
+    const existing = await this.turnRepo.findOne({
+      where: { sessionId, userPrompt, finalAgentResponse: IsNull() },
+      order: { createdAt: 'DESC' },
+    });
+    if (existing) return existing;
+
+    const turn = this.turnRepo.create({
+      sessionId,
+      userPrompt,
+      metadata,
+    });
+    return this.turnRepo.save(turn);
+  }
+
+  async saveStepTraces(
+    turnId: string,
+    traces: Partial<StepTraceEntity>[],
+  ): Promise<void> {
+    const entities = traces.map((t) =>
+      this.stepTraceRepo.create({ ...t, turnId }),
+    );
+    await this.stepTraceRepo.save(entities);
   }
 
   async deleteByUserId(userId: string): Promise<any> {
-    return this.conversationModel.deleteMany({ userId }).exec();
+    return this.sessionRepo.delete({ externalUserId: userId });
   }
 
   private sanitizeIdentity(text: string): string {
@@ -741,7 +863,12 @@ Text: "${text}"`;
 
     // Save initial message history
     if (sessionId) {
-      this.saveMessages(sessionId, messages, userId).catch(() => {});
+      await this.findOrCreateSession(sessionId, userId);
+      await this.saveInitialTurn(
+        sessionId,
+        sanitizedContent,
+        lastUserMsg.metadata,
+      ).catch(() => {});
     }
 
     const availableModels = getAvailableModels();
@@ -768,7 +895,9 @@ Text: "${text}"`;
                 q: z
                   .string()
                   .min(3)
-                  .describe("Search query string (e.g. 'chocolate', 'gift basket', 'flowers')"),
+                  .describe(
+                    "Search query string (e.g. 'chocolate', 'gift basket', 'flowers')",
+                  ),
                 category: z
                   .string()
                   .optional()
@@ -794,11 +923,15 @@ Text: "${text}"`;
                 sort: z
                   .string()
                   .optional()
-                  .describe("Sort order: 'relevance', 'price_asc', 'price_desc', 'newest', 'bestseller'"),
+                  .describe(
+                    "Sort order: 'relevance', 'price_asc', 'price_desc', 'newest', 'bestseller'",
+                  ),
               }),
               execute: async (args: any) => {
                 // Log raw args to debug what the LLM is actually sending
-                this.logger.log(`[Tool] kapruka_search_products raw args: ${JSON.stringify(args)}`);
+                this.logger.log(
+                  `[Tool] kapruka_search_products raw args: ${JSON.stringify(args)}`,
+                );
 
                 // Try known parameter names first
                 let q = (args.q ||
@@ -822,7 +955,9 @@ Text: "${text}"`;
                       key !== 'cursor' &&
                       key !== 'response_format'
                     ) {
-                      this.logger.log(`[Tool] Using fallback param "${key}" = "${val}" as search query`);
+                      this.logger.log(
+                        `[Tool] Using fallback param "${key}" = "${val}" as search query`,
+                      );
                       q = val.trim();
                       break;
                     }
@@ -831,10 +966,13 @@ Text: "${text}"`;
 
                 // Guard: don't call MCP with empty query — it returns nothing and wastes steps
                 if (!q.trim()) {
-                  this.logger.warn(`[Tool] kapruka_search_products called with empty query. Args: ${JSON.stringify(args)}`);
+                  this.logger.warn(
+                    `[Tool] kapruka_search_products called with empty query. Args: ${JSON.stringify(args)}`,
+                  );
                   return {
                     error: 'empty_query',
-                    message: 'Search query cannot be empty. Please provide a search term (e.g. "flowers", "chocolate", "birthday cake"). Use the "q" parameter.',
+                    message:
+                      'Search query cannot be empty. Please provide a search term (e.g. "flowers", "chocolate", "birthday cake"). Use the "q" parameter.',
                     results: [],
                   };
                 }
@@ -846,16 +984,23 @@ Text: "${text}"`;
                 if (args.category) params.category = args.category;
                 if (args.limit) params.limit = args.limit;
                 if (args.cursor) params.cursor = args.cursor;
-                if (args.min_price !== undefined) params.min_price = args.min_price;
-                if (args.max_price !== undefined) params.max_price = args.max_price;
-                if (args.in_stock_only !== undefined) params.in_stock_only = args.in_stock_only;
+                if (args.min_price !== undefined)
+                  params.min_price = args.min_price;
+                if (args.max_price !== undefined)
+                  params.max_price = args.max_price;
+                if (args.in_stock_only !== undefined)
+                  params.in_stock_only = args.in_stock_only;
                 if (args.sort) params.sort = args.sort;
 
-                this.logger.log(`[Tool] kapruka_search_products: q="${q.trim()}", category=${args.category || 'none'}`);
+                this.logger.log(
+                  `[Tool] kapruka_search_products: q="${q.trim()}", category=${args.category || 'none'}`,
+                );
                 const result = await callMcpTool('kapruka_search_products', {
                   params,
                 });
-                this.logger.log(`[Tool] kapruka_search_products returned ${result?.results?.length || 0} results`);
+                this.logger.log(
+                  `[Tool] kapruka_search_products returned ${result?.results?.length || 0} results`,
+                );
 
                 if (sessionId) {
                   this.analyticsService
@@ -897,7 +1042,9 @@ Text: "${text}"`;
                 if (args.currency) params.currency = args.currency;
                 if (args.type) params.type = args.type;
 
-                this.logger.log(`[Tool] kapruka_get_product: id="${productId}"`);
+                this.logger.log(
+                  `[Tool] kapruka_get_product: id="${productId}"`,
+                );
                 const result = await callMcpTool('kapruka_get_product', {
                   params,
                 });
@@ -935,7 +1082,9 @@ Text: "${text}"`;
                 const params: Record<string, any> = { response_format: 'json' };
                 if (args.depth !== undefined) params.depth = args.depth;
 
-                this.logger.log(`[Tool] kapruka_list_categories: depth=${args.depth || 1}`);
+                this.logger.log(
+                  `[Tool] kapruka_list_categories: depth=${args.depth || 1}`,
+                );
                 const result = await callMcpTool('kapruka_list_categories', {
                   params,
                 });
@@ -1067,7 +1216,10 @@ Text: "${text}"`;
                 cart: z.array(
                   z.object({
                     product_id: z.string(),
-                    quantity: z.number().optional().describe('Quantity, default 1'),
+                    quantity: z
+                      .number()
+                      .optional()
+                      .describe('Quantity, default 1'),
                     icing_text: z.string().optional(),
                   }),
                 ),
@@ -1081,7 +1233,9 @@ Text: "${text}"`;
                   location_type: z
                     .string()
                     .optional()
-                    .describe("Location type: 'house', 'apartment', 'office', 'other'. Default 'house'"),
+                    .describe(
+                      "Location type: 'house', 'apartment', 'office', 'other'. Default 'house'",
+                    ),
                   date: z.string(),
                   instructions: z.string().optional(),
                 }),
@@ -1177,63 +1331,166 @@ Text: "${text}"`;
             } as any),
           },
           stopWhen: stepCountIs(5),
-          onFinish: async ({ response }) => {
+          onFinish: async ({ response, usage }) => {
             if (sessionId) {
-              const messagesToSave = JSON.parse(
-                JSON.stringify(response.messages),
-              );
+              setImmediate(() => {
+                void (async () => {
+                  try {
+                    const messagesToSave = JSON.parse(
+                      JSON.stringify(response.messages),
+                    );
 
-              for (const msg of messagesToSave) {
-                if (msg.role === 'assistant') {
-                  if (typeof msg.content === 'string') {
-                    const originalEnglish = msg.content;
-                    let processedText = this.sanitizeIdentity(originalEnglish);
-                    if (targetLang === 'sinhala' || targetLang === 'tanglish') {
-                      processedText = await this.translateOutput(
-                        processedText,
-                        targetLang,
-                      );
-                      processedText = this.sanitizeIdentity(processedText);
-                    }
-                    msg.content = processedText;
-                    msg.metadata = {
-                      englishText: originalEnglish,
-                      originalText: processedText,
-                    };
-                  } else if (Array.isArray(msg.content)) {
-                    for (const part of msg.content) {
-                      if (
-                        part.type === 'text' &&
-                        typeof part.text === 'string'
-                      ) {
-                        const originalEnglish = part.text;
-                        let processedText =
-                          this.sanitizeIdentity(originalEnglish);
-                        if (
-                          targetLang === 'sinhala' ||
-                          targetLang === 'tanglish'
-                        ) {
-                          processedText = await this.translateOutput(
-                            processedText,
-                            targetLang,
-                          );
-                          processedText = this.sanitizeIdentity(processedText);
+                    let responseText = '';
+                    let originalText = '';
+
+                    for (const msg of messagesToSave) {
+                      if (msg.role === 'assistant') {
+                        if (typeof msg.content === 'string') {
+                          const originalEnglish = msg.content;
+                          let processedText =
+                            this.sanitizeIdentity(originalEnglish);
+                          if (
+                            targetLang === 'sinhala' ||
+                            targetLang === 'tanglish'
+                          ) {
+                            processedText = await this.translateOutput(
+                              processedText,
+                              targetLang,
+                            );
+                            processedText =
+                              this.sanitizeIdentity(processedText);
+                          }
+                          msg.content = processedText;
+                          msg.metadata = {
+                            englishText: originalEnglish,
+                            originalText: processedText,
+                          };
+                          responseText = processedText;
+                          originalText = originalEnglish;
+                        } else if (Array.isArray(msg.content)) {
+                          for (const part of msg.content) {
+                            if (
+                              part.type === 'text' &&
+                              typeof part.text === 'string'
+                            ) {
+                              const originalEnglish = part.text;
+                              let processedText =
+                                this.sanitizeIdentity(originalEnglish);
+                              if (
+                                targetLang === 'sinhala' ||
+                                targetLang === 'tanglish'
+                              ) {
+                                processedText = await this.translateOutput(
+                                  processedText,
+                                  targetLang,
+                                );
+                                processedText =
+                                  this.sanitizeIdentity(processedText);
+                              }
+                              part.text = processedText;
+                              part.metadata = {
+                                englishText: originalEnglish,
+                                originalText: processedText,
+                              };
+                              responseText += processedText;
+                              originalText += originalEnglish;
+                            }
+                          }
                         }
-                        part.text = processedText;
-                        part.metadata = {
-                          englishText: originalEnglish,
-                          originalText: processedText,
-                        };
                       }
                     }
-                  }
-                }
-              }
 
-              const finalMessages = [...messages, ...messagesToSave];
-              this.saveMessages(sessionId, finalMessages, userId).catch(
-                () => {},
-              );
+                    // Retrieve the latest turn for this session which has a null response
+                    let turn = await this.turnRepo.findOne({
+                      where: { sessionId, finalAgentResponse: IsNull() },
+                      order: { createdAt: 'DESC' },
+                    });
+
+                    if (!turn) {
+                      // Fallback: create a new turn if none exists
+                      turn = this.turnRepo.create({
+                        sessionId,
+                        userPrompt: userMessageContent,
+                        metadata: lastUserMsg.metadata,
+                      });
+                      await this.turnRepo.save(turn);
+                    }
+
+                    // Update the turn with final response and token usage
+                    turn.finalAgentResponse = responseText;
+                    if (turn.metadata) {
+                      turn.metadata.assistantEnglishText = originalText;
+                    } else {
+                      turn.metadata = { assistantEnglishText: originalText };
+                    }
+                    turn.promptTokens = (usage as any)?.promptTokens || 0;
+                    turn.completionTokens =
+                      (usage as any)?.completionTokens || 0;
+                    await this.turnRepo.save(turn);
+
+                    // Parse and save tool call step traces in batch
+                    const tracesToSave: Partial<StepTraceEntity>[] = [];
+                    for (const msg of response.messages) {
+                      if (
+                        msg.role === 'assistant' &&
+                        Array.isArray(msg.content)
+                      ) {
+                        for (const part of msg.content) {
+                          if (part.type === 'tool-call') {
+                            let outputPayload: any = null;
+                            const toolMsg = response.messages.find(
+                              (m: any) =>
+                                m.role === 'tool' &&
+                                Array.isArray(m.content) &&
+                                m.content.some(
+                                  (c: any) => c.toolCallId === part.toolCallId,
+                                ),
+                            );
+                            if (toolMsg) {
+                              const resultPart = (
+                                toolMsg.content as any[]
+                              ).find(
+                                (c: any) => c.toolCallId === part.toolCallId,
+                              );
+                              outputPayload =
+                                resultPart?.result ?? resultPart?.output;
+                            }
+
+                            tracesToSave.push({
+                              stepType: StepType.MCP_TOOL_CALL,
+                              nodeName: part.toolName,
+                              inputPayload: {
+                                ...(part as any).args,
+                                toolCallId: part.toolCallId,
+                                ...((part as any).providerOptions
+                                  ? {
+                                      providerOptions: (part as any)
+                                        .providerOptions,
+                                    }
+                                  : {}),
+                              },
+                              outputPayload: outputPayload
+                                ? typeof outputPayload === 'object'
+                                  ? outputPayload
+                                  : { value: outputPayload }
+                                : null,
+                            });
+                          }
+                        }
+                      }
+                    }
+
+                    if (tracesToSave.length > 0) {
+                      await this.saveStepTraces(turn.id, tracesToSave);
+                    }
+                  } catch (err) {
+                    this.logger.error(
+                      'Error saving turn/traces in onFinish:',
+                      err,
+                    );
+                  }
+                })();
+              });
             }
           },
         });
@@ -1370,43 +1627,41 @@ Text: "${text}"`;
     const params: Record<string, any> = { response_format: 'json', ...body };
     const result = await callMcpTool('kapruka_create_order', { params });
 
-    if (result?.checkout_url) {
+    if (typeof result === 'string') {
+      if (result.startsWith('Error')) {
+        throw new BadRequestException(result);
+      }
+      throw new BadRequestException(`Order creation failed: ${result}`);
+    }
+
+    if (!result || !result.checkout_url) {
+      throw new BadRequestException(
+        'Order creation failed: No checkout URL returned',
+      );
+    }
+
+    if (result.checkout_url) {
       // Persist a synthetic confirmation message into conversation history
       if (sessionId) {
-        const toolCallId = `quick-order-${Date.now()}`;
-        const confirmMessages = [
-          {
-            id: toolCallId + '-user',
-            role: 'user',
-            parts: [
-              {
-                type: 'text',
-                text: `Quick order placed for product ${body.cart[0]?.product_id}`,
-              },
-            ],
-          },
-          {
-            id: toolCallId,
-            role: 'assistant',
-            parts: [
-              { type: 'text', text: `Your order has been placed! 🎉` },
-              {
-                type: 'tool-invocation',
-                toolCallId,
-                toolName: 'kapruka_create_order',
-                state: 'result',
-                result,
-              },
-            ],
-          },
-        ];
+        await this.findOrCreateSession(sessionId, userId);
 
-        const existingMessages = await this.getHistory(sessionId, userId);
-        this.saveMessages(
+        const turn = this.turnRepo.create({
           sessionId,
-          [...existingMessages, ...confirmMessages],
-          userId,
-        ).catch(() => {});
+          userPrompt: `Quick order placed for product ${body.cart[0]?.product_id}`,
+          finalAgentResponse: `Your order has been placed! 🎉`,
+          metadata: { isQuickOrder: true },
+        });
+        await this.turnRepo.save(turn);
+
+        const toolCallId = `quick-order-${Date.now()}`;
+        await this.saveStepTraces(turn.id, [
+          {
+            stepType: StepType.MCP_TOOL_CALL,
+            nodeName: 'kapruka_create_order',
+            inputPayload: { ...body, toolCallId },
+            outputPayload: result,
+          },
+        ]).catch(() => {});
 
         this.analyticsService
           .logOrder({
