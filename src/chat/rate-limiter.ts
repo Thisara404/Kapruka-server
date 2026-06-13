@@ -16,7 +16,7 @@ const interval = setInterval(() => {
   }
 }, 600000); // Clean up every 10 minutes
 
-if (typeof interval.unref === "function") {
+if (typeof interval.unref === 'function') {
   interval.unref();
 }
 
@@ -30,7 +30,7 @@ if (typeof interval.unref === "function") {
 export function checkRateLimit(
   key: string,
   limit: number,
-  windowMs = 3600000
+  windowMs = 3600000,
 ): { allowed: boolean; remaining: number; resetAt: Date } {
   const now = Date.now();
   const cutoff = now - windowMs;

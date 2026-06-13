@@ -2,9 +2,19 @@ import { Injectable, Logger } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { Order, OrderDocument } from './schemas/order.schema';
-import { ProductView, ProductViewDocument } from './schemas/product-view.schema';
-import { DeliveryCheck, DeliveryCheckDocument } from './schemas/delivery-check.schema';
-import { Analytics, AnalyticsDocument, AnalyticsEvent } from './schemas/analytics.schema';
+import {
+  ProductView,
+  ProductViewDocument,
+} from './schemas/product-view.schema';
+import {
+  DeliveryCheck,
+  DeliveryCheckDocument,
+} from './schemas/delivery-check.schema';
+import {
+  Analytics,
+  AnalyticsDocument,
+  AnalyticsEvent,
+} from './schemas/analytics.schema';
 
 @Injectable()
 export class AnalyticsService {
@@ -12,9 +22,12 @@ export class AnalyticsService {
 
   constructor(
     @InjectModel(Order.name) private readonly orderModel: Model<OrderDocument>,
-    @InjectModel(ProductView.name) private readonly productViewModel: Model<ProductViewDocument>,
-    @InjectModel(DeliveryCheck.name) private readonly deliveryCheckModel: Model<DeliveryCheckDocument>,
-    @InjectModel(Analytics.name) private readonly analyticsModel: Model<AnalyticsDocument>,
+    @InjectModel(ProductView.name)
+    private readonly productViewModel: Model<ProductViewDocument>,
+    @InjectModel(DeliveryCheck.name)
+    private readonly deliveryCheckModel: Model<DeliveryCheckDocument>,
+    @InjectModel(Analytics.name)
+    private readonly analyticsModel: Model<AnalyticsDocument>,
   ) {}
 
   async logProductView(data: any): Promise<any> {
@@ -66,19 +79,21 @@ export class AnalyticsService {
         metadata: data.metadata,
         timestamp: new Date(),
       };
-      return await this.analyticsModel.updateOne(
-        { sessionId: data.sessionId },
-        {
-          $push: { events: event },
-          $set: {
-            userId: data.userId,
-            ipAddress: data.ipAddress,
-            updatedAt: new Date(),
+      return await this.analyticsModel
+        .updateOne(
+          { sessionId: data.sessionId },
+          {
+            $push: { events: event },
+            $set: {
+              userId: data.userId,
+              ipAddress: data.ipAddress,
+              updatedAt: new Date(),
+            },
+            $setOnInsert: { createdAt: new Date() },
           },
-          $setOnInsert: { createdAt: new Date() },
-        },
-        { upsert: true }
-      ).exec();
+          { upsert: true },
+        )
+        .exec();
     } catch (err: any) {
       this.logger.warn(`Failed to log event: ${err.message}`);
     }
@@ -86,11 +101,21 @@ export class AnalyticsService {
 
   async migrateSession(sessionId: string, userId: string): Promise<any> {
     try {
-      this.logger.log(`Migrating session records for ${sessionId} to user ${userId}`);
-      await this.orderModel.updateMany({ sessionId }, { $set: { userId } }).exec();
-      await this.analyticsModel.updateMany({ sessionId }, { $set: { userId } }).exec();
-      await this.productViewModel.updateMany({ sessionId }, { $set: { userId } }).exec();
-      await this.deliveryCheckModel.updateMany({ sessionId }, { $set: { userId } }).exec();
+      this.logger.log(
+        `Migrating session records for ${sessionId} to user ${userId}`,
+      );
+      await this.orderModel
+        .updateMany({ sessionId }, { $set: { userId } })
+        .exec();
+      await this.analyticsModel
+        .updateMany({ sessionId }, { $set: { userId } })
+        .exec();
+      await this.productViewModel
+        .updateMany({ sessionId }, { $set: { userId } })
+        .exec();
+      await this.deliveryCheckModel
+        .updateMany({ sessionId }, { $set: { userId } })
+        .exec();
     } catch (err: any) {
       this.logger.error(`Migration of session records failed: ${err.message}`);
     }

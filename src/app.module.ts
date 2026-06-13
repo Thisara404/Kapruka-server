@@ -10,7 +10,10 @@ import { DeactivationModule } from './deactivation/deactivation.module';
 
 @Module({
   imports: [
-    ConfigModule.forRoot({ isGlobal: true, envFilePath: ['.env', '.env.local', '../thisari-app/.env.local'] }),
+    ConfigModule.forRoot({
+      isGlobal: true,
+      envFilePath: ['.env', '.env.local', '../thisari-app/.env.local'],
+    }),
     ScheduleModule.forRoot(),
     DatabaseModule,
     AuthModule,
@@ -21,4 +24,3 @@ import { DeactivationModule } from './deactivation/deactivation.module';
   ],
 })
 export class AppModule {}
-

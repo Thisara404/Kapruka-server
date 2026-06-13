@@ -1,8 +1,7 @@
-import { Injectable, UnauthorizedException } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcryptjs';
 import { UsersService } from '../users/users.service';
-import { User } from '../users/schemas/user.schema';
 
 @Injectable()
 export class AuthService {
@@ -57,7 +56,7 @@ export class AuthService {
       user.image = profile.image;
       await user.save();
     }
-    
+
     return this.login(user);
   }
 }

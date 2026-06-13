@@ -3,7 +3,10 @@ import { MongooseModule } from '@nestjs/mongoose';
 import { AnalyticsService } from './analytics.service';
 import { Order, OrderSchema } from './schemas/order.schema';
 import { ProductView, ProductViewSchema } from './schemas/product-view.schema';
-import { DeliveryCheck, DeliveryCheckSchema } from './schemas/delivery-check.schema';
+import {
+  DeliveryCheck,
+  DeliveryCheckSchema,
+} from './schemas/delivery-check.schema';
 import { Analytics, AnalyticsSchema } from './schemas/analytics.schema';
 
 @Module({

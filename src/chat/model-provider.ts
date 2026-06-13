@@ -1,16 +1,20 @@
-import { google } from "@ai-sdk/google";
-import { createOpenAI } from "@ai-sdk/openai";
+import { google } from '@ai-sdk/google';
+import { createOpenAI } from '@ai-sdk/openai';
 
 const BASE_MODELS = [
-  "gemini-3.5-flash",
-  "gemini-2.5-flash",
-  "gemini-3.1-flash-lite",
+  'gemini-3.5-flash',
+  'gemini-2.5-flash',
+  'gemini-3.1-flash-lite',
 ];
 
 const cooldowns = new Map<string, number>();
 
 let loggedFallbackState = false;
-let providerCache: { key: string; baseURL: string; provider: ReturnType<typeof createOpenAI> } | null = null;
+let providerCache: {
+  key: string;
+  baseURL: string;
+  provider: ReturnType<typeof createOpenAI>;
+} | null = null;
 
 function getFallbackKey(): string {
   return (
@@ -18,25 +22,31 @@ function getFallbackKey(): string {
     process.env.GROK_API_KEY ||
     process.env.XAI_API_KEY ||
     process.env.GROQ_API_KEY ||
-    ""
+    ''
   );
 }
 
 function isGroqKey(key: string): boolean {
-  return key.startsWith("gsk_");
+  return key.startsWith('gsk_');
 }
 
 function getFallbackConfig() {
   const key = getFallbackKey();
   const groq = isGroqKey(key);
-  const modelName = groq ? "llama-3.3-70b-versatile" : "grok-2";
-  const baseURL = groq ? "https://api.groq.com/openai/v1" : "https://api.x.ai/v1";
+  const modelName = groq ? 'llama-3.3-70b-versatile' : 'grok-2';
+  const baseURL = groq
+    ? 'https://api.groq.com/openai/v1'
+    : 'https://api.x.ai/v1';
 
   if (!loggedFallbackState) {
     if (!key) {
-      console.warn("[Model Provider] No Grok/Groq API key detected. Set GROK_API_KEY, XAI_API_KEY or GROQ_API_KEY for fallback.");
+      console.warn(
+        '[Model Provider] No Grok/Groq API key detected. Set GROK_API_KEY, XAI_API_KEY or GROQ_API_KEY for fallback.',
+      );
     } else {
-      console.log(`[Model Provider] Fallback provider active: ${groq ? "Groq" : "xAI"} (${modelName})`);
+      console.log(
+        `[Model Provider] Fallback provider active: ${groq ? 'Groq' : 'xAI'} (${modelName})`,
+      );
     }
     loggedFallbackState = true;
   }
@@ -45,7 +55,11 @@ function getFallbackConfig() {
 }
 
 function getFallbackProvider(apiKey: string, baseURL: string) {
-  if (providerCache && providerCache.key === apiKey && providerCache.baseURL === baseURL) {
+  if (
+    providerCache &&
+    providerCache.key === apiKey &&
+    providerCache.baseURL === baseURL
+  ) {
     return providerCache.provider;
   }
 
@@ -57,11 +71,13 @@ function getFallbackProvider(apiKey: string, baseURL: string) {
 export function getAvailableModels(): string[] {
   const { key, modelName } = getFallbackConfig();
 
-  const models = [...BASE_MODELS];
+  const models: string[] = [];
   if (key) {
-    // Keep Gemini primary but move fallback right after first choice for quick failover.
-    models.splice(1, 0, modelName);
+    // Llama is the primary model
+    models.push(modelName);
   }
+  // Gemini models are the fallbacks
+  models.push(...BASE_MODELS);
 
   const now = Date.now();
   const available = models.filter((model) => {
@@ -70,7 +86,9 @@ export function getAvailableModels(): string[] {
   });
 
   if (available.length === 0) {
-    console.log("[Model Provider] All models are on cooldown. Resetting cooldowns.");
+    console.log(
+      '[Model Provider] All models are on cooldown. Resetting cooldowns.',
+    );
     cooldowns.clear();
     return models;
   }
@@ -81,22 +99,24 @@ export function getAvailableModels(): string[] {
 export function markModelFailed(model: string, durationMs = 60000) {
   const expires = Date.now() + durationMs;
   cooldowns.set(model, expires);
-  console.warn(`[Model Provider] Model "${model}" put on cooldown until ${new Date(expires).toLocaleTimeString()}`);
+  console.warn(
+    `[Model Provider] Model "${model}" put on cooldown until ${new Date(expires).toLocaleTimeString()}`,
+  );
 }
 
 export function clearCooldowns() {
   cooldowns.clear();
-  console.log("[Model Provider] Cooldowns cleared.");
+  console.log('[Model Provider] Cooldowns cleared.');
 }
 
 export function getModelInstance(modelName: string) {
-  if (modelName.startsWith("gemini-")) {
+  if (modelName.startsWith('gemini-')) {
     return google(modelName);
   }
 
   const { key, modelName: fallbackModel, baseURL } = getFallbackConfig();
   if (modelName === fallbackModel && key) {
-    return getFallbackProvider(key, baseURL)(modelName);
+    return getFallbackProvider(key, baseURL).chat(modelName);
   }
 
   throw new Error(`[Model Provider] Unknown model name: ${modelName}`);

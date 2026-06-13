@@ -27,5 +27,4 @@ async function bootstrap() {
   await app.listen(port);
   console.log(`[NestJS] Backend running on http://localhost:${port}/api`);
 }
-bootstrap();
-
+bootstrap().catch((err) => console.error('Bootstrap failed:', err));

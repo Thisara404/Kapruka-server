@@ -39,10 +39,12 @@ export class UsersService {
   }
 
   async markDeactivated(userId: string): Promise<any> {
-    return this.userModel.updateOne(
-      { _id: userId },
-      { $set: { deactivated: true, deactivatedAt: new Date() } }
-    ).exec();
+    return this.userModel
+      .updateOne(
+        { _id: userId },
+        { $set: { deactivated: true, deactivatedAt: new Date() } },
+      )
+      .exec();
   }
 
   async deleteOne(userId: string): Promise<any> {

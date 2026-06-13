@@ -18,4 +18,5 @@ export class DeactivatedUser {
   deleteAfter: Date; // Indexed to support TTL deletion or manual cron sweeps
 }
 
-export const DeactivatedUserSchema = SchemaFactory.createForClass(DeactivatedUser);
+export const DeactivatedUserSchema =
+  SchemaFactory.createForClass(DeactivatedUser);

@@ -1,7 +1,7 @@
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 
-const MCP_URL = "https://mcp.kapruka.com/mcp";
+const MCP_URL = 'https://mcp.kapruka.com/mcp';
 
 let client: Client | null = null;
 let isConnecting = false;
@@ -14,7 +14,7 @@ export async function getMcpClient(): Promise<Client> {
   if (isConnecting) {
     await new Promise((resolve) => setTimeout(resolve, 1000));
     if (client) return client;
-    throw new Error("MCP connection in progress, please retry");
+    throw new Error('MCP connection in progress, please retry');
   }
 
   isConnecting = true;
@@ -22,18 +22,18 @@ export async function getMcpClient(): Promise<Client> {
   try {
     const transport = new StreamableHTTPClientTransport(new URL(MCP_URL));
     const newClient = new Client(
-      { name: "thisari-agent", version: "1.0.0" },
-      { capabilities: {} }
+      { name: 'thisari-agent', version: '1.0.0' },
+      { capabilities: {} },
     );
 
     await newClient.connect(transport);
     client = newClient;
-    console.log("[MCP] Connected to Kapruka MCP server");
+    console.log('[MCP] Connected to Kapruka MCP server');
     return client;
   } catch (error) {
-    console.error("[MCP] Connection failed:", error);
+    console.error('[MCP] Connection failed:', error);
     throw new Error(
-      `Failed to connect to Kapruka MCP: ${error instanceof Error ? error.message : "Unknown error"}`
+      `Failed to connect to Kapruka MCP: ${error instanceof Error ? error.message : 'Unknown error'}`,
     );
   } finally {
     isConnecting = false;
@@ -42,7 +42,7 @@ export async function getMcpClient(): Promise<Client> {
 
 export async function callMcpTool(
   toolName: string,
-  args: Record<string, unknown>
+  args: Record<string, unknown>,
 ): Promise<any> {
   const c = await getMcpClient();
 
@@ -51,9 +51,9 @@ export async function callMcpTool(
 
     if (result.content && Array.isArray(result.content)) {
       const textContent = result.content.find(
-        (c: { type: string }) => c.type === "text"
+        (c: { type: string }) => c.type === 'text',
       );
-      if (textContent && "text" in textContent) {
+      if (textContent && 'text' in textContent) {
         // Parse as JSON if possible, otherwise return raw text
         const text = textContent.text as string;
         try {

@@ -1,0 +1,870 @@
+Tools count: 7
+
+======================================
+Tool Name: kapruka_list_categories
+Description: List top-level Kapruka product categories by name with browse URLs.
+
+    Returns category names (usable as the `category` filter on kapruka_search_products)
+    plus the public Kapruka.com URL for each category landing page — useful for shopping
+    agents that want to send users directly to a category to browse. Internal IDs and
+    product counts are not exposed. Results are cached for 30 minutes server-side.
+
+    Args:
+        params (ListCategoriesInput):
+            - depth (int): Sub-category levels to include, 1 or 2 (default 1)
+            - response_format (str): 'markdown' (default) or 'json'
+
+    Returns:
+        str: Category tree in the requested format.
+
+        JSON schema:
+        {
+          "categories": [
+            {
+              "name": str,
+              "url": str,                  # kapruka.com category landing page
+              "children": [{"name": str, "url": str, "children": [...]}]
+            }
+          ]
+        }
+
+        Error: "Error: <message>" on failure.
+    
+Input Schema:
+{
+  "type": "object",
+  "properties": {
+    "params": {
+      "$ref": "#/$defs/ListCategoriesInput"
+    }
+  },
+  "required": [
+    "params"
+  ],
+  "$defs": {
+    "ListCategoriesInput": {
+      "additionalProperties": false,
+      "properties": {
+        "depth": {
+          "default": 1,
+          "description": "How many levels of sub-categories to include (1 or 2). Default 1.",
+          "maximum": 2,
+          "minimum": 1,
+          "title": "Depth",
+          "type": "integer"
+        },
+        "response_format": {
+          "default": "markdown",
+          "description": "'markdown' for human-readable output, 'json' for raw structured data.",
+          "title": "Response Format",
+          "type": "string"
+        }
+      },
+      "title": "ListCategoriesInput",
+      "type": "object"
+    }
+  },
+  "title": "kapruka_list_categoriesArguments"
+}
+
+======================================
+Tool Name: kapruka_get_product
+Description: Fetch full details for a single Kapruka product by its product ID.
+
+    Returns name, description, price (with optional currency conversion), stock status,
+    images, variants, shipping info, and a direct product URL.
+
+    Note: Some IDs starting with 'CATSYM' are category landing pages, not purchasable
+    products — this tool will flag those clearly.
+
+    Args:
+        params (GetProductInput):
+            - product_id (str): Kapruka product ID (e.g. 'cake00ka002034')
+            - currency (str): Price currency — LKR (default), USD, GBP, AUD, CAD, EUR
+            - type (Optional[str]): Optional type hint (e.g. 'specialgifts')
+            - response_format (str): 'markdown' (default) or 'json'
+
+    Returns:
+        str: Product details in the requested format.
+
+        JSON schema:
+        {
+          "id": str,
+          "name": str,
+          "description": str,
+          "summary": str,
+          "price": {"amount": float, "currency": str},
+          "compare_at_price": {"amount": float, "currency": str} | null,
+          "in_stock": bool,
+          "stock_level": str,           # "low" | "medium" | "high"
+          "category": {"id": str, "name": str, "slug": str, "path": str},
+          "variants": [{"id": str, "name": str, "sku": str, "price": {...},
+                        "in_stock": bool, "stock_level": str, "attributes": {...}}],
+          "images": [str],              # list of full-resolution image URLs
+          "attributes": {"type": str, "subtype": str, "weight": str, "vendor": str},
+          "shipping": {"ships_from": str, "ships_internationally": bool, "restricted_countries": [str]},
+          "rating": null,
+          "url": str
+        }
+
+        Error: "Error: <message>" on failure.
+    
+Input Schema:
+{
+  "type": "object",
+  "properties": {
+    "params": {
+      "$ref": "#/$defs/GetProductInput"
+    }
+  },
+  "required": [
+    "params"
+  ],
+  "$defs": {
+    "GetProductInput": {
+      "additionalProperties": false,
+      "properties": {
+        "product_id": {
+          "description": "Kapruka product ID (e.g. 'cake00ka002034', 'EF_PC_CHOC0V2774P00065')",
+          "maxLength": 80,
+          "minLength": 3,
+          "title": "Product Id",
+          "type": "string"
+        },
+        "currency": {
+          "default": "LKR",
+          "description": "Price currency. Supported: LKR, USD, GBP, AUD, CAD, EUR",
+          "title": "Currency",
+          "type": "string"
+        },
+        "type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional product type hint passed to the API (e.g. 'specialgifts'). Rarely needed.",
+          "title": "Type"
+        },
+        "response_format": {
+          "default": "markdown",
+          "description": "'markdown' for human-readable output, 'json' for raw structured data.",
+          "title": "Response Format",
+          "type": "string"
+        }
+      },
+      "required": [
+        "product_id"
+      ],
+      "title": "GetProductInput",
+      "type": "object"
+    }
+  },
+  "title": "kapruka_get_productArguments"
+}
+
+======================================
+Tool Name: kapruka_search_products
+Description: Search for products on Kapruka.com by keyword, with optional category filter and pagination.
+
+    Returns a ranked list of matching products with prices, stock status, images, and URLs.
+    Supports cursor-based pagination — pass next_cursor from one response into the next call.
+    Pagination is capped at 3 pages per query to discourage catalog enumeration; for broader
+    discovery, refine the query or filter by category instead.
+
+    Queries must be at least 3 characters and contain specific terms — pure stopword queries
+    (e.g. "the", "a an") are rejected.
+
+    By default, category landing pages (CATSYM entries with price=0) are filtered out so results
+    contain only purchasable products. Set include_stubs=true to include them.
+
+    Args:
+        params (SearchProductsInput):
+            - q (str): Search query (e.g. 'birthday cake', 'roses', 'tea gift'). Min 3 chars.
+            - category (Optional[str]): Category filter (e.g. 'Birthday', 'Flowers')
+            - limit (int): Results per page, 1–50 (default 10)
+            - cursor (Optional[str]): Pagination cursor from previous response
+            - currency (str): LKR (default), USD, GBP, AUD, CAD, EUR
+            - min_price (Optional[float]): Min price (inclusive) in the requested currency
+            - max_price (Optional[float]): Max price (inclusive) in the requested currency
+            - in_stock_only (bool): Restrict to in-stock items (default false)
+            - sort (str): 'relevance' | 'price_asc' | 'price_desc' | 'newest' | 'bestseller'
+            - include_stubs (bool): Include category landing pages (default false)
+            - response_format (str): 'markdown' (default) or 'json'
+
+    Returns:
+        str: Search results in the requested format.
+
+        JSON schema:
+        {
+          "results": [
+            {
+              "id": str,
+              "name": str,
+              "summary": str,
+              "price": {"amount": float | null, "currency": str},
+              "compare_at_price": {"amount": float, "currency": str} | null,
+              "in_stock": bool,
+              "stock_level": str,
+              "image_url": str | null,
+              "category": {"id": str, "name": str, "slug": str},
+              "rating": null,
+              "ships_internationally": bool,
+              "url": str
+            }
+          ],
+          "next_cursor": str | null,    # null after page 3 even if upstream has more
+          "applied_filters": {"q": str, "limit": int, "in_stock_only": bool}
+        }
+
+        Error: "Error: <message>" or "No products found for '<query>'" on failure.
+    
+Input Schema:
+{
+  "type": "object",
+  "properties": {
+    "params": {
+      "$ref": "#/$defs/SearchProductsInput"
+    }
+  },
+  "required": [
+    "params"
+  ],
+  "$defs": {
+    "SearchProductsInput": {
+      "additionalProperties": false,
+      "properties": {
+        "q": {
+          "description": "Search query (e.g. 'birthday cake', 'roses', 'chocolates for mom'). Min 3 characters, must contain specific terms (not stopwords only).",
+          "maxLength": 200,
+          "minLength": 3,
+          "title": "Q",
+          "type": "string"
+        },
+        "category": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Filter by category name (e.g. 'Birthday', 'Cakes', 'Flowers'). Case-insensitive.",
+          "title": "Category"
+        },
+        "limit": {
+          "default": 10,
+          "description": "Number of results to return (1–50).",
+          "maximum": 50,
+          "minimum": 1,
+          "title": "Limit",
+          "type": "integer"
+        },
+        "cursor": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Pagination cursor from a previous search response's 'next_cursor' field.",
+          "title": "Cursor"
+        },
+        "currency": {
+          "default": "LKR",
+          "description": "Price currency. Supported: LKR, USD, GBP, AUD, CAD, EUR",
+          "title": "Currency",
+          "type": "string"
+        },
+        "min_price": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Minimum price (inclusive), in the requested currency.",
+          "title": "Min Price"
+        },
+        "max_price": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Maximum price (inclusive), in the requested currency.",
+          "title": "Max Price"
+        },
+        "in_stock_only": {
+          "default": false,
+          "description": "If true, only return products currently in stock.",
+          "title": "In Stock Only",
+          "type": "boolean"
+        },
+        "sort": {
+          "default": "relevance",
+          "description": "Sort order: 'relevance' (default), 'price_asc', 'price_desc', 'newest', 'bestseller'.",
+          "title": "Sort",
+          "type": "string"
+        },
+        "include_stubs": {
+          "default": false,
+          "description": "If false (default), category landing pages (CATSYM entries, price=0) are filtered out.",
+          "title": "Include Stubs",
+          "type": "boolean"
+        },
+        "response_format": {
+          "default": "markdown",
+          "description": "'markdown' for human-readable output, 'json' for raw structured data.",
+          "title": "Response Format",
+          "type": "string"
+        }
+      },
+      "required": [
+        "q"
+      ],
+      "title": "SearchProductsInput",
+      "type": "object"
+    }
+  },
+  "title": "kapruka_search_productsArguments"
+}
+
+======================================
+Tool Name: kapruka_list_delivery_cities
+Description: List or search Sri Lankan cities Kapruka delivers to.
+
+    Use the `query` param to filter (e.g. "colombo" → all Colombo zones,
+    "anur" → Anuradhapura). Without a query you get the first 25 cities
+    alphabetically, which is rarely what an agent needs — pass a query.
+
+    Returns canonical city names (use these as the `city` argument to
+    kapruka_check_delivery) plus any common aliases / vernacular spellings.
+
+    Args:
+        params (ListDeliveryCitiesInput):
+            - query (Optional[str]): Partial match filter
+            - limit (int): Max results, 1–50 (default 25)
+            - response_format (str): 'markdown' (default) or 'json'
+
+    Returns:
+        str: Cities list in the requested format.
+
+        JSON schema:
+        {
+          "cities": [{"name": str, "aliases": [str]}],
+          "total_matched": int,
+          "showing": int
+        }
+    
+Input Schema:
+{
+  "type": "object",
+  "properties": {
+    "params": {
+      "$ref": "#/$defs/ListDeliveryCitiesInput"
+    }
+  },
+  "required": [
+    "params"
+  ],
+  "$defs": {
+    "ListDeliveryCitiesInput": {
+      "additionalProperties": false,
+      "properties": {
+        "query": {
+          "anyOf": [
+            {
+              "maxLength": 50,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Filter cities by partial match against name or aliases (case-insensitive). Omit to see the first `limit` cities alphabetically.",
+          "title": "Query"
+        },
+        "limit": {
+          "default": 25,
+          "description": "Max cities to return (1–50).",
+          "maximum": 50,
+          "minimum": 1,
+          "title": "Limit",
+          "type": "integer"
+        },
+        "response_format": {
+          "default": "markdown",
+          "description": "'markdown' (default) or 'json'",
+          "title": "Response Format",
+          "type": "string"
+        }
+      },
+      "title": "ListDeliveryCitiesInput",
+      "type": "object"
+    }
+  },
+  "title": "kapruka_list_delivery_citiesArguments"
+}
+
+======================================
+Tool Name: kapruka_check_delivery
+Description: Check whether Kapruka can deliver to a given city on a given date, and at what rate.
+
+    Returns the flat delivery rate (LKR), whether the requested date is available,
+    and — if not — the next available date plus reason. Kapruka delivers as a
+    single shipment per order at one flat rate regardless of item count.
+
+    If a `product_id` is supplied and the code matches a perishable family
+    (CAKE*, FLOWER*, COMBO*), an extra warning is added when the chosen
+    delivery date is more than 1 day out.
+
+    Args:
+        params (CheckDeliveryInput):
+            - city (str): Canonical city name (e.g. 'Colombo 03', 'Galle')
+            - delivery_date (Optional[str]): YYYY-MM-DD; defaults to today (LK time)
+            - product_id (Optional[str]): Optional, enables perishable warning
+            - response_format (str): 'markdown' (default) or 'json'
+
+    Returns:
+        str: Delivery feasibility + rate in the requested format.
+
+        JSON schema:
+        {
+          "city": str,
+          "now": str,                       # ISO timestamp, Sri Lanka time
+          "checked_date": str,              # YYYY-MM-DD
+          "available": bool,
+          "rate": number,                   # flat LKR rate per order
+          "currency": "LKR",
+          "reason": str | null,             # populated when available=false
+          "next_available_date": str|null,  # populated when available=false
+          "perishable_warning": str | null  # populated when product_id is perishable
+        }
+    
+Input Schema:
+{
+  "type": "object",
+  "properties": {
+    "params": {
+      "$ref": "#/$defs/CheckDeliveryInput"
+    }
+  },
+  "required": [
+    "params"
+  ],
+  "$defs": {
+    "CheckDeliveryInput": {
+      "additionalProperties": false,
+      "properties": {
+        "city": {
+          "description": "Canonical city name (use kapruka_list_delivery_cities to find one). Examples: 'Colombo 03', 'Anuradhapura', 'Galle'.",
+          "maxLength": 100,
+          "minLength": 2,
+          "title": "City",
+          "type": "string"
+        },
+        "delivery_date": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Target delivery date in ISO format (YYYY-MM-DD), Sri Lanka time. Omit to check today.",
+          "title": "Delivery Date"
+        },
+        "product_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional product ID. If provided and the product looks perishable (cake/flower/combo codes), a freshness warning is added when the chosen date is more than 1 day out.",
+          "title": "Product Id"
+        },
+        "response_format": {
+          "default": "markdown",
+          "description": "'markdown' (default) or 'json'",
+          "title": "Response Format",
+          "type": "string"
+        }
+      },
+      "required": [
+        "city"
+      ],
+      "title": "CheckDeliveryInput",
+      "type": "object"
+    }
+  },
+  "title": "kapruka_check_deliveryArguments"
+}
+
+======================================
+Tool Name: kapruka_create_order
+Description: Create a guest-checkout order on Kapruka and return a click-to-pay link.
+
+    Builds a Kapruka order from the supplied cart + recipient + delivery + sender,
+    then returns a checkout URL the customer opens in a browser to complete payment.
+    No Kapruka account is required. Prices are locked for the lifetime of the link
+    (60 minutes) — the customer pays exactly the quoted grand total even if the
+    catalog price changes meanwhile.
+
+    Free public tier limits: 30 orders per hour per client IP. Cart up to 30 items,
+    quantity up to 99 per item. A fresh idempotency key is generated per call so
+    retries on transient errors return the same checkout URL rather than duplicates.
+
+    Args:
+        params (CreateOrderInput):
+            - cart (list[CartItem]): 1–30 items. Each: product_id, quantity (default 1), optional icing_text (cakes only).
+            - recipient (Recipient): name + phone (E.164 +9477… or local 077…)
+            - delivery (Delivery): address, city (must be Kapruka-deliverable — use kapruka_list_delivery_cities), location_type (house/apartment/office/other, default house), date (YYYY-MM-DD, today-or-future Asia/Colombo), optional instructions
+            - sender (Sender): name + anonymous flag
+            - gift_message (Optional[str]): Up to 300 chars
+            - currency (str): LKR (default), USD, GBP, AUD, CAD, EUR
+            - response_format (str): 'markdown' (default) or 'json'
+
+    Returns:
+        str: Order confirmation with checkout URL.
+
+        JSON schema:
+        {
+          "checkout_url": str,           # Open in browser to pay (no login required)
+          "order_ref": str,              # e.g. "ORD-20260520-7823"
+          "summary": {
+            "items_total":   number,
+            "delivery_fee":  number,
+            "addons_total":  number,
+            "grand_total":   number,     # items_total + delivery_fee + addons_total
+            "currency":      str
+          },
+          "expires_at": str              # ISO 8601 — link stops working after this
+        }
+
+        Error: "Error (<code>): <message>" on failure. Common codes:
+          empty_cart, missing_field, past_delivery_date, product_not_found,
+          product_out_of_stock, city_not_deliverable, date_not_deliverable.
+    
+Input Schema:
+{
+  "type": "object",
+  "properties": {
+    "params": {
+      "$ref": "#/$defs/CreateOrderInput"
+    }
+  },
+  "required": [
+    "params"
+  ],
+  "$defs": {
+    "CartItem": {
+      "additionalProperties": false,
+      "properties": {
+        "product_id": {
+          "description": "Kapruka product ID (e.g. 'cake00ka002034').",
+          "maxLength": 80,
+          "minLength": 3,
+          "title": "Product Id",
+          "type": "string"
+        },
+        "quantity": {
+          "default": 1,
+          "description": "Quantity (1–99).",
+          "maximum": 99,
+          "minimum": 1,
+          "title": "Quantity",
+          "type": "integer"
+        },
+        "icing_text": {
+          "anyOf": [
+            {
+              "maxLength": 120,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Cake icing text. Silently ignored for non-cake products.",
+          "title": "Icing Text"
+        }
+      },
+      "required": [
+        "product_id"
+      ],
+      "title": "CartItem",
+      "type": "object"
+    },
+    "CreateOrderInput": {
+      "additionalProperties": false,
+      "properties": {
+        "cart": {
+          "description": "1–30 items.",
+          "items": {
+            "$ref": "#/$defs/CartItem"
+          },
+          "maxItems": 30,
+          "minItems": 1,
+          "title": "Cart",
+          "type": "array"
+        },
+        "recipient": {
+          "$ref": "#/$defs/Recipient"
+        },
+        "delivery": {
+          "$ref": "#/$defs/Delivery"
+        },
+        "sender": {
+          "$ref": "#/$defs/Sender"
+        },
+        "gift_message": {
+          "anyOf": [
+            {
+              "maxLength": 300,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional gift card message.",
+          "title": "Gift Message"
+        },
+        "currency": {
+          "default": "LKR",
+          "description": "Pricing currency. Supported: LKR, USD, GBP, AUD, CAD, EUR.",
+          "title": "Currency",
+          "type": "string"
+        },
+        "response_format": {
+          "default": "markdown",
+          "description": "'markdown' (default) or 'json'.",
+          "title": "Response Format",
+          "type": "string"
+        }
+      },
+      "required": [
+        "cart",
+        "recipient",
+        "delivery",
+        "sender"
+      ],
+      "title": "CreateOrderInput",
+      "type": "object"
+    },
+    "Delivery": {
+      "additionalProperties": false,
+      "properties": {
+        "address": {
+          "description": "Street address.",
+          "maxLength": 250,
+          "minLength": 3,
+          "title": "Address",
+          "type": "string"
+        },
+        "city": {
+          "description": "Must be a Kapruka delivery city — use kapruka_list_delivery_cities to look up valid names.",
+          "maxLength": 100,
+          "minLength": 2,
+          "title": "City",
+          "type": "string"
+        },
+        "location_type": {
+          "default": "house",
+          "description": "One of: house, apartment, office, other.",
+          "title": "Location Type",
+          "type": "string"
+        },
+        "date": {
+          "description": "Delivery date in YYYY-MM-DD (Asia/Colombo). Must be today or future.",
+          "title": "Date",
+          "type": "string"
+        },
+        "instructions": {
+          "anyOf": [
+            {
+              "maxLength": 250,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Free-form delivery instructions.",
+          "title": "Instructions"
+        }
+      },
+      "required": [
+        "address",
+        "city",
+        "date"
+      ],
+      "title": "Delivery",
+      "type": "object"
+    },
+    "Recipient": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "description": "Recipient name shown on the order.",
+          "maxLength": 80,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "phone": {
+          "description": "Recipient phone — E.164 (+9477…) or local SL (077…) format.",
+          "maxLength": 30,
+          "minLength": 7,
+          "title": "Phone",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "phone"
+      ],
+      "title": "Recipient",
+      "type": "object"
+    },
+    "Sender": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "description": "Sender name on the gift card.",
+          "maxLength": 80,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "anonymous": {
+          "default": false,
+          "description": "If true, gift card shows 'Anonymous' instead of the sender name.",
+          "title": "Anonymous",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "Sender",
+      "type": "object"
+    }
+  },
+  "title": "kapruka_create_orderArguments"
+}
+
+======================================
+Tool Name: kapruka_track_order
+Description: Look up status and delivery progress for a Kapruka order by order number.
+
+    Returns current status (received / confirmed / out-for-delivery / delivered /
+    cancelled), the recipient and delivery details on file, a timestamped progress
+    timeline, the cart contents, and flags for whether a delivery photo or video is
+    available. Use this after a customer has placed and paid for an order and reads
+    back the order number from their confirmation email or the order complete page.
+
+    The order number is NOT the `order_ref` returned by kapruka_create_order
+    (which is the pre-payment checkout reference). Once the customer completes
+    payment in the browser, Kapruka emails them a separate order number — that
+    is what this tool expects.
+
+    Args:
+        params (TrackOrderInput):
+            - order_number (str): Kapruka order number (e.g. 'VIMP34456CB2')
+            - response_format (str): 'markdown' (default) or 'json'
+
+    Returns:
+        str: Order tracking details in the requested format.
+
+        JSON schema:
+        {
+          "order_number": str,
+          "pnref": str,                 # internal payment reference (numeric; not the same as order_number)
+          "status": str,                # received | confirmed | shipped | delivered | cancelled | ...
+          "status_display": str,        # human label
+          "order_date": str,            # human-formatted, Asia/Colombo
+          "delivery_date": str,         # human-formatted
+          "shipped_date": str | null,
+          "amount": str,                # LKR string (e.g. "15500.00")
+          "payment_method": str,
+          "comments": str | null,
+          "recipient": {"name": str, "phone": str, "address": str, "city": str},
+          "greeting_message": str | null,
+          "special_instructions": str | null,
+          "progress": [{"step": str, "timestamp": str}],
+          "live_tracking_available": bool,
+          "has_delivery_video": bool,
+          "has_delivery_photo": bool,
+          "items": [{"product_id": str, "name": str, "quantity": int, "selling_price": float}]
+        }
+
+        Error: "Error: <message>" on failure (e.g. order not found).
+    
+Input Schema:
+{
+  "type": "object",
+  "properties": {
+    "params": {
+      "$ref": "#/$defs/TrackOrderInput"
+    }
+  },
+  "required": [
+    "params"
+  ],
+  "$defs": {
+    "TrackOrderInput": {
+      "additionalProperties": false,
+      "properties": {
+        "order_number": {
+          "description": "Order number from the customer's Kapruka order confirmation email or the order complete page on kapruka.com (e.g. 'VIMP34456CB2'). This is NOT the same as the order_ref returned by kapruka_create_order — the customer must complete payment first; the Kapruka order number is then emailed to them.",
+          "maxLength": 40,
+          "minLength": 4,
+          "title": "Order Number",
+          "type": "string"
+        },
+        "response_format": {
+          "default": "markdown",
+          "description": "'markdown' (default) or 'json'.",
+          "title": "Response Format",
+          "type": "string"
+        }
+      },
+      "required": [
+        "order_number"
+      ],
+      "title": "TrackOrderInput",
+      "type": "object"
+    }
+  },
+  "title": "kapruka_track_orderArguments"
+}

@@ -1,5 +1,8 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { MongooseOptionsFactory, MongooseModuleOptions } from '@nestjs/mongoose';
+import {
+  MongooseOptionsFactory,
+  MongooseModuleOptions,
+} from '@nestjs/mongoose';
 import { MongoClient } from 'mongodb';
 
 @Injectable()
@@ -23,42 +26,56 @@ export class MongooseConfigService implements MongooseOptionsFactory {
       const testClient = new MongoClient(primaryUri, options);
       await testClient.connect();
       await testClient.close();
-      this.logger.log('Primary MONGODB_URL connection successful. Using standard connection.');
+      this.logger.log(
+        'Primary MONGODB_URL connection successful. Using standard connection.',
+      );
       return {
         uri: primaryUri,
       };
     } catch (err: any) {
       this.logger.warn(`Primary MONGODB_URL connection failed: ${err.message}`);
-      
+
       const isSrvOrDnsFailure =
         err.message?.includes('querySrv') ||
         err.message?.includes('ECONNREFUSED') ||
         err.code === 'ECONNREFUSED' ||
         err.message?.includes('DNS');
 
-      if (primaryUri.startsWith('mongodb+srv://') && isSrvOrDnsFailure && primaryUri.includes('kaprukacluster0.kyxtwj9.mongodb.net')) {
-        this.logger.log('Detected querySrv/DNS failure. Trying pre-resolved replica set fallback URI...');
+      if (
+        primaryUri.startsWith('mongodb+srv://') &&
+        isSrvOrDnsFailure &&
+        primaryUri.includes('kaprukacluster0.kyxtwj9.mongodb.net')
+      ) {
+        this.logger.log(
+          'Detected querySrv/DNS failure. Trying pre-resolved replica set fallback URI...',
+        );
         try {
-          const match = primaryUri.match(/mongodb\+srv:\/\/([^:]+):([^@]+)@kaprukacluster0\.kyxtwj9\.mongodb\.net/);
+          const match = primaryUri.match(
+            /mongodb\+srv:\/\/([^:]+):([^@]+)@kaprukacluster0\.kyxtwj9\.mongodb\.net/,
+          );
           if (match) {
             const user = match[1];
             const pass = match[2];
             const fallbackUri = `mongodb://${user}:${pass}@ac-qhm2oje-shard-00-00.kyxtwj9.mongodb.net:27017,ac-qhm2oje-shard-00-01.kyxtwj9.mongodb.net:27017,ac-qhm2oje-shard-00-02.kyxtwj9.mongodb.net:27017/thisari_db?ssl=true&authSource=admin&replicaSet=atlas-ov62pk-shard-0&appName=KaprukaCluster0`;
-            
+
             // Test fallback connection
             const testClient = new MongoClient(fallbackUri, options);
             await testClient.connect();
             await testClient.close();
-            this.logger.log('Connected successfully using replica set fallback URI!');
+            this.logger.log(
+              'Connected successfully using replica set fallback URI!',
+            );
             return {
               uri: fallbackUri,
             };
           }
         } catch (fallbackErr: any) {
-          this.logger.error(`Replica set fallback connection also failed: ${fallbackErr.message}`);
+          this.logger.error(
+            `Replica set fallback connection also failed: ${fallbackErr.message}`,
+          );
         }
       }
-      
+
       // If fallback failed or wasn't applicable, return primary anyway to let mongoose fail natively
       return {
         uri: primaryUri,
