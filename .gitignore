@@ -1,3 +1,6 @@
 node_modules
 .env
 dist
+/test_translation_direct.js
+/scratch_call_tool.js
+/scratch_list_tools.js

@@ -25,7 +25,54 @@ import {
   markModelFailed,
   getModelInstance,
   isFallbackModel,
+  classifyRateLimitError,
+  logExecutionCycle,
+  clearCooldowns,
 } from './model-provider.js';
+
+const SINGLISH_WORDS = new Set([
+  // Greetings & Common Polite Words
+  "kohomada", "subha", "dawasak", "ayubowan", "halow", "isthuthi", "sthuthi", "karunakarala",
+  
+  // Pronouns & People
+  "oyata", "mata", "eyata", "api", "oyala", "mam", "mama", "oya", "eya", "meya", "thama", "un", "ogolla",
+  "machan", "malli", "nangi", "aiya", "akka", "amma", "thaththa", "yaluwa", "mithraya", "thambi",
+  
+  // Verbs & Action Words (Common colloquial forms)
+  "karanne", "karanna", "karapan", "yanne", "yanna", "yapan", "enna", "enawa", "yanawa", "innawa", 
+  "inna", "innada", "kanawa", "kanne", "kanna", "bonawa", "bonne", "bonna", "kiyanna", 
+  "kiyapan", "hadanna", "hadanawa", "puluwan", "puluwanda", "baha", "ba", "be", "nathnam",
+  "awilla", "gihin", "balanna", "balanawa", "danna", "dananawa", "dapan", "damma", "ganna", "gannawa",
+  
+  // Interrogatives (Questions)
+  "mokada", "monada", "kauda", "mokatada", "koheda", "kohomad", "mokakda", "ai", "moko",
+  
+  // Adjectives & Particles & Conversational Fillers
+  "hari", "ne", "naha", "na", "neda", "ane", "anei", "mey", "me", "mokut", "monawahari",
+  "dan", "wela", "velawa", "heta", "ada", "iyye", "thawa", "ithiri", "godak", "chuttak", "poddak",
+  "ela", "patta", "supiri", "maru", "nikan", "awlak", "aulak", "niyamai", "sira", "sirawatama"
+]);
+
+const TANGLISH_WORDS = new Set([
+  // Greetings & Polite expressions
+  "vanakkam", "nandri", "hello", "hi", "varuga", "saranam",
+  
+  // Pronouns & People
+  "enaku", "unaku", "avan", "ava", "naan", "nee", "enga", "nanga", "avanga", "ivanga", "ungaluku",
+  "macha", "machi", "thambi", "anna", "akka", "thala", "nanba", "nanbi", "maama", "mami", "muttal",
+  
+  // Verbs & Common Actions
+  "irukenga", "irukinga", "irukira", "iruku", "irukan", "poda", "ponga", "vanga", "va", "po", 
+  "saptiya", "sapadu", "sollu", "sollunga", "panrenga", "panringa", "varatuma", "varum", "illai", 
+  "ama", "irukku", "poidu", "seyya", "panni", "kelu", "ketingala",
+  
+  // Interrogatives
+  "enna", "epdi", "yaaru", "yenna", "yean", "eppo", "enga", "edhu", "eppadi", "ethana",
+  
+  // Conversational Modifiers & Slang
+  "super", "semma", "romba", "nalla", "kuda", "vada", "seri", "apdiya", "paravala", "konjam", 
+  "miga", "vegam", "pathu", "theriyum", "theriyathu"
+]);
 
 /**
  * Converts a mixed array of UIMessages (parts[]) and ModelMessages (content[])
@@ -533,50 +580,141 @@ export class ChatService {
       .replace(/\bClaude\b/gi, 'Thisari');
   }
 
+  private getTranslationModelName(): string {
+    const available = getAvailableModels();
+    return available[0] || 'gemini-3.5-flash';
+  }
+
+  private estimateTokenCount(messages: any[], systemPrompt: string): number {
+    let text = systemPrompt || '';
+    for (const m of messages) {
+      if (m.content) {
+        if (typeof m.content === 'string') {
+          text += m.content;
+        } else if (Array.isArray(m.content)) {
+          for (const p of m.content) {
+            if (p.type === 'text' && p.text) {
+              text += p.text;
+            }
+          }
+        }
+      } else if (m.parts) {
+        for (const p of m.parts) {
+          if (p.text) {
+            text += p.text;
+          }
+        }
+      }
+    }
+    return Math.ceil(text.length / 4);
+  }
+
+  private detectLanguageLocally(text: string): 'sinhala' | 'tanglish' | 'english' {
+    if (!text || !text.trim()) {
+      return 'english';
+    }
+
+    // 1. Inspect Native Scripts via Unicode Ranges
+    // Sinhala Unicode range: U+0D80 to U+0DFF
+    const hasSinhalaUnicode = /[\u0D80-\u0DFF]/.test(text);
+    // Tamil Unicode range: U+0B80 to U+0BFF
+    const hasTamilUnicode = /[\u0B80-\u0BFF]/.test(text);
+
+    if (hasSinhalaUnicode) {
+      return 'sinhala';
+    }
+    if (hasTamilUnicode) {
+      return 'tanglish';
+    }
+
+    // 2. Parse, Clean and Tokenize English Text
+    const cleanText = text.toLowerCase().replace(/[^\w\s]/g, '');
+    const tokens = cleanText.split(/\s+/).filter(Boolean);
+
+    // 3. Match against lists
+    let matchedSinglishCount = 0;
+    let matchedTanglishCount = 0;
+
+    for (const token of tokens) {
+      if (SINGLISH_WORDS.has(token)) {
+        matchedSinglishCount++;
+      }
+      if (TANGLISH_WORDS.has(token)) {
+        matchedTanglishCount++;
+      }
+    }
+
+    // 4. Apply strict classification priority rules
+    if (matchedSinglishCount > matchedTanglishCount && matchedSinglishCount > 0) {
+      return 'tanglish';
+    }
+    if (matchedTanglishCount > 0) {
+      return 'tanglish';
+    }
+
+    return 'english';
+  }
+
   private async translateInput(text: string): Promise<{
     translatedText: string;
     detectedLanguage: 'sinhala' | 'tanglish' | 'english';
   }> {
-    try {
-      this.logger.log(`Translating input message using Gemini...`);
-      const response = await generateText({
-        model: getModelInstance('gemini-3.5-flash'),
-        prompt: `Analyze the language of the following user query for Kapruka shopping.
-If it is in Sinhala script (සිංහල), translate it to standard English and respond in this exact format: "sinhala: [English translation]".
-If it is in Singlish/Tanglish (Sinhala/Tamil transliterated in English script, e.g. "cake monada thiyenne", "oyala delivery karanawada"), translate it to standard English and respond in this exact format: "tanglish: [English translation]".
-If it is already in English, return it exactly as-is and respond in this exact format: "english: [Original query]".
+    const detectedLanguage = this.detectLanguageLocally(text);
 
-Respond ONLY in the format "language: translation". Do not add any explanation or other text.
+    if (detectedLanguage === 'english') {
+      return { translatedText: text, detectedLanguage: 'english' };
+    }
+
+    const modelName = this.getTranslationModelName();
+    try {
+      this.logger.log(
+        `Translating input message (${detectedLanguage}) using ${modelName}...`,
+      );
+      const response = await generateText({
+        model: getModelInstance(modelName),
+        prompt: `Translate the following user query from ${
+          detectedLanguage === 'sinhala'
+            ? 'Sinhala (සිංහල script)'
+            : 'Singlish/Tanglish (Sinhala/Tamil transliterated in English script)'
+        } into standard English for e-commerce search.
+
+Here are some examples:
+${
+  detectedLanguage === 'sinhala'
+    ? `User query: "ලස්සන මල් කළඹක් තෝරලා දෙන්න"
+Translation: Select a beautiful flower bouquet for me.
+
+User query: "උපන්දින කේක් වර්ග මොනවාද තියෙන්නේ"
+Translation: What kinds of birthday cakes do you have?`
+    : `User query: "cake monada thiyenne"
+Translation: What cakes do you have?
+
+User query: "oyala colombo walata delivery karanawada"
+Translation: Do you deliver to Colombo?
+
+User query: "oyage nama mokakda"
+Translation: What is your name?
+
+User query: "machan"
+Translation: friend`
+}
+
+Now translate the following query. Respond ONLY with the English translation. Do not add any explanation, prefix, or other text.
 
 Query: "${text}"`,
         maxRetries: 1,
       });
 
-      const responseText = response.text.trim();
-      const firstColon = responseText.indexOf(':');
-      if (firstColon !== -1) {
-        const language = responseText
-          .substring(0, firstColon)
-          .trim()
-          .toLowerCase();
-        const translation = responseText.substring(firstColon + 1).trim();
-        if (
-          language === 'sinhala' ||
-          language === 'tanglish' ||
-          language === 'english'
-        ) {
-          return {
-            translatedText: translation,
-            detectedLanguage: language,
-          };
-        }
-      }
-      return { translatedText: text, detectedLanguage: 'english' };
+      return {
+        translatedText: response.text.trim(),
+        detectedLanguage,
+      };
     } catch (err: any) {
       this.logger.warn(
-        `Gemini input translation failed (falling back to raw text): ${err.message || err}`,
+        `Translation input failed on model "${modelName}": ${err.message || err}`,
       );
-      return { translatedText: text, detectedLanguage: 'english' };
+      markModelFailed(modelName);
+      return { translatedText: text, detectedLanguage };
     }
   }
 
@@ -585,19 +723,58 @@ Query: "${text}"`,
     targetLang: 'sinhala' | 'tanglish',
   ): Promise<string> {
     if (!text || !text.trim()) return text;
+    const modelName = this.getTranslationModelName();
     try {
       this.logger.log(
-        `Translating assistant output to ${targetLang} using Gemini...`,
+        `Translating assistant output to ${targetLang} using ${modelName}...`,
       );
       const prompt =
         targetLang === 'sinhala'
-          ? `Translate the following English e-commerce assistant text into warm, friendly, natural Sinhala (සිංහල). Keep product names, prices (e.g. Rs. 3,500), and product IDs in English. Return ONLY the translated Sinhala text. Do not add any introduction, explanations, or note.
+          ? `Translate the following English e-commerce assistant text into warm, friendly, natural Sinhala (සිංහල). Keep product names, prices (e.g. Rs. 3,500), and product IDs in English.
+
+Here are some examples of how to translate:
+English Text: "Hello! I am Thisari, your Kapruka shopping assistant. How can I help you today?"
+Translation: "ආයුබෝවන්! මම තිසරි, ඔබේ කප්රුක සාප්පු සහායිකාව. අද මම ඔබට උදව් කරන්නේ කෙසේද?"
+
+English Text: "We have some delicious chocolate cakes under Rs. 10,000. Here is a list of items:"
+Translation: "අප සතුව රු. 10,000ට අඩු රසවත් චොකලට් කේක් කිහිපයක් තිබේ. මෙන්න අයිතම ලැයිස්තුව:"
+
+English Text: "Would you like to place an order?"
+Translation: "ඔබ ඇණවුමක් කිරීමට කැමතිද?"
+
+English Text: "Your order has been placed successfully! The payment link is: https://example.com"
+Translation: "ඔබේ ඇණවුම සාර්ථකව සිදු කරන ලදී! ගෙවීම් සබැඳිය: https://example.com"
+
+English Text: "What is the delivery address and contact phone number?"
+Translation: "භාර දිය යුතු ලිපිනය සහ සම්බන්ධ කර ගත හැකි දුරකථන අංකය කුමක්ද?"
+
+Now translate the following text. Return ONLY the translated Sinhala text. Do not add any introduction, explanations, or notes.
+
 Text: "${text}"`
-          : `Translate the following English e-commerce assistant text into warm, friendly, natural Singlish/Tanglish (Sinhala/Tamil written in English characters, e.g., "oya" instead of "you", "thiyenne" instead of "available"). Keep product names, prices, and IDs in English. Return ONLY the translated transliterated text. Do not add any introduction, explanations, or note.
+          : `Translate the following English e-commerce assistant text into warm, friendly, natural Singlish/Tanglish (Sinhala/Tamil written in English characters, e.g., "oya" instead of "you", "thiyenne" instead of "available", "oyata" instead of "for you"). Keep product names, prices (e.g. Rs. 3,500), and product IDs in English.
+
+Here are some examples of how to translate:
+English Text: "Hello! I am Thisari, your Kapruka shopping assistant. How can I help you today?"
+Translation: "Hello! Mama Thisari, oyage Kapruka shopping assistant. Ada mama oyata kohomada udau karanne?"
+
+English Text: "We have some delicious chocolate cakes under Rs. 10,000. Here is a list of items:"
+Translation: "Apiga gawa Rs. 10,000 adu rasama rasa chocolate cakes thiyenawa. Menna items list eka:"
+
+English Text: "Would you like to place an order?"
+Translation: "Oyata order ekak danna oneda?"
+
+English Text: "Your order has been placed successfully! The payment link is: https://example.com"
+Translation: "Oyage order eka successfully place kala! Payment link eka: https://example.com"
+
+English Text: "What is the delivery address and contact phone number?"
+Translation: "Delivery address eka saha contact phone number eka mokakda?"
+
+Now translate the following text. Return ONLY the translated transliterated text. Do not add any introduction, explanations, or notes.
+
 Text: "${text}"`;
 
       const response = await generateText({
-        model: getModelInstance('gemini-3.5-flash'),
+        model: getModelInstance(modelName),
         prompt,
         maxRetries: 1,
       });
@@ -605,8 +782,9 @@ Text: "${text}"`;
       return response.text.trim();
     } catch (err: any) {
       this.logger.warn(
-        `Gemini output translation to ${targetLang} failed (falling back to raw English): ${err.message || err}`,
+        `Translation output to ${targetLang} failed on model "${modelName}": ${err.message || err}`,
       );
+      markModelFailed(modelName);
       return text;
     }
   }
@@ -614,6 +792,7 @@ Text: "${text}"`;
   private processResponseStream(
     inputStream: ReadableStream<Uint8Array>,
     targetLang: 'sinhala' | 'tanglish' | 'english',
+    modelName: string,
   ): ReadableStream<Uint8Array> {
     const reader = inputStream.getReader();
     const decoder = new TextDecoder();
@@ -691,6 +870,34 @@ Text: "${text}"`;
               break;
             }
           } catch (err) {
+            const errorType = classifyRateLimitError(err);
+            if (errorType === 'RPD') {
+              logExecutionCycle(
+                modelName,
+                'FALLBACK_TRIGGERED',
+                'RPD_LIMIT',
+                'SWAPPED_MODEL',
+              );
+              markModelFailed(modelName, 24 * 60 * 60 * 1000);
+            } else if (errorType === 'RPM') {
+              logExecutionCycle(
+                modelName,
+                'FALLBACK_TRIGGERED',
+                'RPM_LIMIT',
+                'SWAPPED_MODEL',
+              );
+              markModelFailed(modelName, 60000);
+            } else if (errorType === 'TPM') {
+              logExecutionCycle(
+                modelName,
+                'FALLBACK_TRIGGERED',
+                'TPM_LIMIT',
+                'SLEEP_60S',
+              );
+              markModelFailed(modelName, 60000);
+            } else {
+              markModelFailed(modelName, 60000);
+            }
             controller.error(err);
             reader.releaseLock();
             break;
@@ -871,15 +1078,33 @@ Text: "${text}"`;
       ).catch(() => {});
     }
 
-    const availableModels = getAvailableModels();
+    const tokenCount = this.estimateTokenCount(converted, getSystemPrompt());
+    const groqModel =
+      tokenCount > 12000 ? 'llama-3.1-8b-instant' : 'llama-3.3-70b-versatile';
+
+    const available = getAvailableModels();
+    const modelsPool: string[] = [];
+    if (available.includes('gemini-3.5-flash'))
+      modelsPool.push('gemini-3.5-flash');
+    if (available.includes('gemini-3.1-flash-lite'))
+      modelsPool.push('gemini-3.1-flash-lite');
+    modelsPool.push(groqModel);
+
     let streamResult: any = null;
     let successfulModel = '';
     let lastError: any = null;
+    let modelIndex = 0;
+
+    let failedOnGemini = false;
+    let failedOnGroq = false;
 
     // Call models in chain until one succeeds or all fail
-    for (const modelName of availableModels) {
+    while (modelIndex < modelsPool.length) {
+      const modelName = modelsPool[modelIndex];
       try {
-        this.logger.log(`Attempting generation with "${modelName}"...`);
+        this.logger.log(
+          `Attempting generation with "${modelName}" (estimated tokens: ${tokenCount})...`,
+        );
         const result = streamText({
           model: getModelInstance(modelName),
           system: getSystemPrompt(),
@@ -1498,17 +1723,30 @@ Text: "${text}"`;
         // 1. Generate the raw message stream response from AI SDK
         const response = result.toUIMessageStreamResponse();
 
-        // 2. Probe the first chunk of the stream to catch immediate errors (e.g. 503 high demand, 429 quota)
+        // 2. Probe the first few chunks of the stream to catch immediate errors (e.g. 503 high demand, 429 quota)
         if (response.body) {
           const reader = response.body.getReader();
-          let firstChunk: Uint8Array | null = null;
+          const probedChunks: Uint8Array[] = [];
           let streamFailed = false;
           let streamError: any = null;
 
           try {
-            const { done, value } = await reader.read();
-            if (!done) {
-              firstChunk = value;
+            // Read up to 3 chunks to bypass initial dummy/protocol chunks and check for errors
+            for (let i = 0; i < 3; i++) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              probedChunks.push(value);
+              
+              const text = new TextDecoder().decode(value);
+              if (text.includes('"type":"error"') || text.includes('"errorText"')) {
+                streamFailed = true;
+                streamError = new Error(text);
+                break;
+              }
+              // If we see actual text content (protocol '0:'), it's a success
+              if (text.includes('0:')) {
+                break;
+              }
             }
           } catch (err) {
             streamFailed = true;
@@ -1520,11 +1758,11 @@ Text: "${text}"`;
             throw streamError; // This lets the catch block mark the model as failed and continue the loop!
           }
 
-          // 3. Recreate the stream to include the first chunk we read for probing
+          // 3. Recreate the stream to include the chunks we read for probing
           const rawStream = new ReadableStream<Uint8Array>({
             async start(controller) {
-              if (firstChunk !== null) {
-                controller.enqueue(firstChunk);
+              for (const chunk of probedChunks) {
+                controller.enqueue(chunk);
               }
             },
             async pull(controller) {
@@ -1537,14 +1775,33 @@ Text: "${text}"`;
                   controller.enqueue(value);
                 }
               } catch (err: any) {
-                const errMsg = String(err?.message || err || 'stream error');
-                const isCapacityError =
-                  errMsg.includes('high demand') ||
-                  errMsg.includes('503') ||
-                  errMsg.includes('UNAVAILABLE');
-                if (isCapacityError) {
-                  // Mark cooldown so the next request uses fallback model immediately
-                  markModelFailed(modelName, 180000);
+                const errorType = classifyRateLimitError(err);
+                if (errorType === 'RPD') {
+                  logExecutionCycle(
+                    modelName,
+                    'FALLBACK_TRIGGERED',
+                    'RPD_LIMIT',
+                    'SWAPPED_MODEL',
+                  );
+                  markModelFailed(modelName, 24 * 60 * 60 * 1000);
+                } else if (errorType === 'RPM') {
+                  logExecutionCycle(
+                    modelName,
+                    'FALLBACK_TRIGGERED',
+                    'RPM_LIMIT',
+                    'SWAPPED_MODEL',
+                  );
+                  markModelFailed(modelName, 60000);
+                } else if (errorType === 'TPM') {
+                  logExecutionCycle(
+                    modelName,
+                    'FALLBACK_TRIGGERED',
+                    'TPM_LIMIT',
+                    'SLEEP_60S',
+                  );
+                  markModelFailed(modelName, 60000);
+                } else {
+                  markModelFailed(modelName, 60000);
                 }
                 controller.error(err);
                 reader.releaseLock();
@@ -1560,6 +1817,7 @@ Text: "${text}"`;
           const processedStream = this.processResponseStream(
             rawStream,
             targetLang,
+            modelName,
           );
 
           const headers = new Headers(response.headers);
@@ -1575,13 +1833,104 @@ Text: "${text}"`;
         }
 
         successfulModel = modelName;
+        logExecutionCycle(modelName, 'SUCCESS', 'NONE', 'PROCEEDED');
         break; // Success, stop trying other models!
       } catch (err: any) {
+        const errorType = classifyRateLimitError(err);
+        const isGemini = modelName.startsWith('gemini-');
+        const isGroq = modelName.startsWith('llama-');
+
+        if (isGemini) failedOnGemini = true;
+        if (isGroq) failedOnGroq = true;
+
         this.logger.warn(
-          `Model "${modelName}" failed during generation: ${err.message || err}`,
+          `[Model Provider] Model "${modelName}" failed. Classification: ${errorType}. Error: ${err?.message || err}`,
         );
+
+        // STEP 4: Hard backoff block (Sequential failure of both systems)
+        if (failedOnGemini && failedOnGroq) {
+          this.logger.warn(
+            `Both Gemini and Groq failed sequentially. Triggering hard 60s backoff sleep...`,
+          );
+          logExecutionCycle(
+            modelName,
+            'FALLBACK_TRIGGERED',
+            'NONE',
+            'SLEEP_60S',
+          );
+          await new Promise((resolve) => setTimeout(resolve, 60000));
+
+          clearCooldowns();
+          failedOnGemini = false;
+          failedOnGroq = false;
+          modelIndex = 0;
+          continue;
+        }
+
+        // STEP 2: Gemini TPM Exhausted -> Route directly to Groq immediately
+        if (errorType === 'TPM' && isGemini) {
+          logExecutionCycle(
+            modelName,
+            'FALLBACK_TRIGGERED',
+            'TPM_LIMIT',
+            'SWAPPED_MODEL',
+          );
+          this.logger.log(
+            `[Model Provider] Gemini TPM limit hit. Bypassing Google ecosystem; swapping directly to Groq model: ${groqModel}`,
+          );
+          markModelFailed('gemini-3.5-flash', 60000);
+          markModelFailed('gemini-3.1-flash-lite', 60000);
+
+          modelIndex = modelsPool.indexOf(groqModel);
+          continue;
+        }
+
         lastError = err;
-        markModelFailed(modelName);
+
+        if (errorType === 'RPD') {
+          logExecutionCycle(
+            modelName,
+            'FALLBACK_TRIGGERED',
+            'RPD_LIMIT',
+            'SWAPPED_MODEL',
+          );
+          markModelFailed(modelName, 24 * 60 * 60 * 1000);
+
+          // If both Gemini models are exhausted, failover directly to Groq
+          if (
+            isGemini &&
+            (modelName === 'gemini-3.1-flash-lite' ||
+              !available.includes('gemini-3.1-flash-lite'))
+          ) {
+            modelIndex = modelsPool.indexOf(groqModel);
+          } else {
+            modelIndex++;
+          }
+        } else if (errorType === 'RPM') {
+          logExecutionCycle(
+            modelName,
+            'FALLBACK_TRIGGERED',
+            'RPM_LIMIT',
+            'SWAPPED_MODEL',
+          );
+          markModelFailed(modelName, 60000);
+
+          // If gemini-3.1-flash-lite RPM is hit, cycle directly to Groq
+          if (isGemini && modelName === 'gemini-3.1-flash-lite') {
+            modelIndex = modelsPool.indexOf(groqModel);
+          } else {
+            modelIndex++;
+          }
+        } else {
+          logExecutionCycle(
+            modelName,
+            'FALLBACK_TRIGGERED',
+            'NONE',
+            'SWAPPED_MODEL',
+          );
+          markModelFailed(modelName, 60000);
+          modelIndex++;
+        }
       }
     }
 
@@ -1597,13 +1946,19 @@ Text: "${text}"`;
     return streamResult;
   }
 
-  async listDeliveryCities(query?: string, limit = 20): Promise<any[]> {
+  async listDeliveryCities(query?: string, limit = 20): Promise<string[]> {
     const params: Record<string, any> = { response_format: 'json', limit };
     if (query) params.query = query;
     const result = await callMcpTool('kapruka_list_delivery_cities', {
       params,
     });
-    return Array.isArray(result) ? result : [];
+    if (result && result.cities && Array.isArray(result.cities)) {
+      return result.cities.map((c: any) => c.name);
+    }
+    if (Array.isArray(result)) {
+      return result.map((c: any) => (typeof c === 'string' ? c : c.name || ''));
+    }
+    return [];
   }
 
   async createQuickOrder(

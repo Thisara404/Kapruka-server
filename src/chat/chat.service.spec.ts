@@ -104,7 +104,7 @@ describe('ChatService', () => {
   describe('translateInput', () => {
     it('should detect Sinhala text and mock translate', async () => {
       (generateText as jest.Mock).mockResolvedValue({
-        text: 'sinhala: What is this cake?',
+        text: 'What is this cake?',
       });
 
       const result = await (service as any).translateInput(
@@ -119,7 +119,7 @@ describe('ChatService', () => {
 
     it('should detect Tanglish text and mock translate', async () => {
       (generateText as jest.Mock).mockResolvedValue({
-        text: 'tanglish: show cakes',
+        text: 'show cakes',
       });
 
       const result = await (service as any).translateInput(
@@ -139,7 +139,7 @@ describe('ChatService', () => {
       const result = await (service as any).translateInput('කේක්');
       expect(result).toEqual({
         translatedText: 'කේක්',
-        detectedLanguage: 'english',
+        detectedLanguage: 'sinhala',
       });
     });
   });

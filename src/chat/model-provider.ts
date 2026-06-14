@@ -1,11 +1,7 @@
 import { google } from '@ai-sdk/google';
 import { createOpenAI } from '@ai-sdk/openai';
 
-const BASE_MODELS = [
-  'gemini-3.5-flash',
-  'gemini-2.5-flash',
-  'gemini-3.1-flash-lite',
-];
+const BASE_MODELS = ['gemini-3.5-flash', 'gemini-3.1-flash-lite'];
 
 const cooldowns = new Map<string, number>();
 
@@ -115,8 +111,8 @@ export function getModelInstance(modelName: string) {
     return google(modelName);
   }
 
-  const { key, modelName: fallbackModel, baseURL } = getFallbackConfig();
-  if (modelName === fallbackModel && key) {
+  const { key, baseURL } = getFallbackConfig();
+  if (key && (modelName.startsWith('llama-') || modelName === 'grok-2')) {
     return getFallbackProvider(key, baseURL).chat(modelName);
   }
 
@@ -126,4 +122,61 @@ export function getModelInstance(modelName: string) {
 export function isFallbackModel(modelName: string): boolean {
   const { modelName: fallbackModel } = getFallbackConfig();
   return modelName === fallbackModel;
+}
+
+export function classifyRateLimitError(
+  err: any,
+): 'RPM' | 'TPM' | 'RPD' | 'OTHER' {
+  const errMsg = String(
+    err?.message ||
+      err?.responseBody ||
+      (err?.cause && (err.cause.message || err.cause)) ||
+      err ||
+      '',
+  ).toLowerCase();
+
+  if (errMsg.includes('token') || errMsg.includes('tpm')) {
+    return 'TPM';
+  }
+  if (
+    errMsg.includes('daily') ||
+    errMsg.includes('rpd') ||
+    errMsg.includes('perday') ||
+    errMsg.includes('daily quota exceeded')
+  ) {
+    return 'RPD';
+  }
+  if (
+    errMsg.includes('queries per minute') ||
+    errMsg.includes('resource has been exhausted') ||
+    errMsg.includes('rpm') ||
+    errMsg.includes('limit: 20') ||
+    errMsg.includes('rate limit') ||
+    errMsg.includes('429') ||
+    errMsg.includes('exhausted')
+  ) {
+    return 'RPM';
+  }
+
+  return 'OTHER';
+}
+
+export function logExecutionCycle(
+  activeModel: string,
+  status: 'SUCCESS' | 'FALLBACK_TRIGGERED',
+  errorType: 'NONE' | 'RPM_LIMIT' | 'TPM_LIMIT' | 'RPD_LIMIT',
+  actionTaken: 'PROCEEDED' | 'SWAPPED_MODEL' | 'SLEEP_60S',
+) {
+  console.log(
+    JSON.stringify(
+      {
+        active_model: activeModel,
+        status,
+        error_type: errorType,
+        action_taken: actionTaken,
+      },
+      null,
+      2,
+    ),
+  );
 }
