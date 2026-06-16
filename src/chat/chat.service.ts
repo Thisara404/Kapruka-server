@@ -35,42 +35,42 @@ const SINGLISH_WORDS = new Set([
   "kohomada", "subha", "dawasak", "ayubowan", "halow", "isthuthi", "sthuthi", "karunakarala",
   
   // Pronouns & People
-  "oyata", "mata", "eyata", "api", "oyala", "mam", "mama", "oya", "eya", "meya", "thama", "un", "ogolla",
+  "oyata", "mata", "eyata", "oyala", "mam", "mama", "oya", "eya", "meya", "thama", "ogolla",
   "machan", "malli", "nangi", "aiya", "akka", "amma", "thaththa", "yaluwa", "mithraya", "thambi",
   
   // Verbs & Action Words (Common colloquial forms)
   "karanne", "karanna", "karapan", "yanne", "yanna", "yapan", "enna", "enawa", "yanawa", "innawa", 
   "inna", "innada", "kanawa", "kanne", "kanna", "bonawa", "bonne", "bonna", "kiyanna", 
-  "kiyapan", "hadanna", "hadanawa", "puluwan", "puluwanda", "baha", "ba", "be", "nathnam",
+  "kiyapan", "hadanna", "hadanawa", "puluwan", "puluwanda", "baha", "nathnam",
   "awilla", "gihin", "balanna", "balanawa", "danna", "dananawa", "dapan", "damma", "ganna", "gannawa",
   
   // Interrogatives (Questions)
   "mokada", "monada", "kauda", "mokatada", "koheda", "kohomad", "mokakda", "ai", "moko",
   
   // Adjectives & Particles & Conversational Fillers
-  "hari", "ne", "naha", "na", "neda", "ane", "anei", "mey", "me", "mokut", "monawahari",
+  "hari", "naha", "neda", "ane", "anei", "mey", "mokut", "monawahari",
   "dan", "wela", "velawa", "heta", "ada", "iyye", "thawa", "ithiri", "godak", "chuttak", "poddak",
   "ela", "patta", "supiri", "maru", "nikan", "awlak", "aulak", "niyamai", "sira", "sirawatama"
 ]);
 
 const TANGLISH_WORDS = new Set([
   // Greetings & Polite expressions
-  "vanakkam", "nandri", "hello", "hi", "varuga", "saranam",
+  "vanakkam", "nandri", "varuga", "saranam",
   
   // Pronouns & People
-  "enaku", "unaku", "avan", "ava", "naan", "nee", "enga", "nanga", "avanga", "ivanga", "ungaluku",
+  "enaku", "unaku", "avan", "ava", "naan", "enga", "nanga", "avanga", "ivanga", "ungaluku",
   "macha", "machi", "thambi", "anna", "akka", "thala", "nanba", "nanbi", "maama", "mami", "muttal",
   
   // Verbs & Common Actions
-  "irukenga", "irukinga", "irukira", "iruku", "irukan", "poda", "ponga", "vanga", "va", "po", 
+  "irukenga", "irukinga", "irukira", "iruku", "irukan", "poda", "ponga", "vanga", 
   "saptiya", "sapadu", "sollu", "sollunga", "panrenga", "panringa", "varatuma", "varum", "illai", 
   "ama", "irukku", "poidu", "seyya", "panni", "kelu", "ketingala",
   
   // Interrogatives
-  "enna", "epdi", "yaaru", "yenna", "yean", "eppo", "enga", "edhu", "eppadi", "ethana",
+  "epdi", "yaaru", "yenna", "yean", "eppo", "enga", "edhu", "eppadi", "ethana",
   
   // Conversational Modifiers & Slang
-  "super", "semma", "romba", "nalla", "kuda", "vada", "seri", "apdiya", "paravala", "konjam", 
+  "semma", "romba", "nalla", "kuda", "vada", "seri", "apdiya", "paravala", "konjam", 
   "miga", "vegam", "pathu", "theriyum", "theriyathu"
 ]);
 
@@ -84,6 +84,102 @@ const TANGLISH_WORDS = new Set([
  * ModelMessage format — produced by onFinish → response.messages
  *   { role: "user"|"assistant"|"tool", content: string | [...] }
  */
+
+/**
+ * Trims a search result payload to keep only essential fields for context.
+ * Strips heavy fields (image URLs, long HTML descriptions, etc.) that bloat
+ * the model context without aiding decision-making.
+ * Critically preserves `next_cursor` for pagination.
+ */
+function trimSearchResult(result: any): any {
+  if (!result || typeof result !== 'object') return result;
+
+  // If it's a search result with a results array, trim each product
+  if (Array.isArray(result.results)) {
+    return {
+      total: result.total,
+      next_cursor: result.next_cursor || null,
+      results: result.results.map((p: any) => ({
+        product_id: p.product_id,
+        name: p.name,
+        price: p.price,
+        in_stock: p.in_stock,
+        category: p.category,
+        // Strip: image_url, description, html_description, browse_url, etc.
+      })),
+    };
+  }
+
+  // If it has a 'value' wrapper (DB-stored format)
+  if (result.value && typeof result.value === 'object') {
+    return { ...result, value: trimSearchResult(result.value) };
+  }
+
+  return result;
+}
+
+/**
+ * Scans the converted model messages to extract:
+ *  - All product IDs that have been shown in previous search tool results
+ *  - The `next_cursor` from the most recent search for a given query
+ * This allows the tool execute to auto-paginate on repeated identical queries.
+ */
+function extractSearchContext(messages: any[]): {
+  shownProductIds: Set<string>;
+  lastCursorsByQuery: Map<string, string>;
+} {
+  const shownProductIds = new Set<string>();
+  const lastCursorsByQuery = new Map<string, string>();
+
+  // Track which tool-call IDs map to which query strings
+  const toolCallQueries = new Map<string, string>();
+
+  for (const msg of messages) {
+    // Scan assistant messages for tool-call args to get the query
+    if (msg.role === 'assistant' && Array.isArray(msg.content)) {
+      for (const part of msg.content) {
+        if (
+          part.type === 'tool-call' &&
+          part.toolName === 'kapruka_search_products'
+        ) {
+          const args = part.input ?? part.args ?? {};
+          const q = (args.q || '').toLowerCase().trim();
+          if (q && part.toolCallId) {
+            toolCallQueries.set(part.toolCallId, q);
+          }
+        }
+      }
+    }
+
+    // Scan tool results for product IDs and cursors
+    if (msg.role === 'tool' && Array.isArray(msg.content)) {
+      for (const part of msg.content) {
+        if (part.type !== 'tool-result') continue;
+
+        const resultData = part.result ?? part.output?.value ?? part.output;
+        if (!resultData || typeof resultData !== 'object') continue;
+
+        // Extract product IDs
+        const results = resultData.results || resultData.value?.results;
+        if (Array.isArray(results)) {
+          for (const p of results) {
+            if (p.product_id) shownProductIds.add(p.product_id);
+          }
+        }
+
+        // Extract next_cursor for this query
+        const cursor = resultData.next_cursor || resultData.value?.next_cursor;
+        const query = toolCallQueries.get(part.toolCallId);
+        if (cursor && query) {
+          lastCursorsByQuery.set(query, cursor);
+        }
+      }
+    }
+  }
+
+  return { shownProductIds, lastCursorsByQuery };
+}
+
 function toModelMessages(messages: any[]): any[] {
   const result: any[] = [];
 
@@ -187,12 +283,15 @@ function toModelMessages(messages: any[]): any[] {
           });
           // If the invocation carries the result, collect it for a tool role message
           if (part.state === 'result' && part.result !== undefined) {
+            const trimmedResult = (part.toolName === 'kapruka_search_products')
+              ? trimSearchResult(part.result)
+              : part.result;
             pendingToolResults.push({
               type: 'tool-result',
               toolCallId: part.toolCallId,
               toolName: part.toolName ?? '',
-              result: part.result,
-              output: { type: 'json', value: part.result },
+              result: trimmedResult,
+              output: { type: 'json', value: trimmedResult },
             });
           }
           continue;
@@ -237,12 +336,19 @@ function toModelMessages(messages: any[]): any[] {
           output = { type: 'json', value: rawOutput ?? null };
         }
 
+        // Trim search results to keep context lean (strip images, HTML, etc.)
+        const isTrimCandidate = (part.toolName === 'kapruka_search_products');
+        const trimmedOutput = isTrimCandidate ? trimSearchResult(output) : output;
+        const trimmedResult = isTrimCandidate
+          ? trimSearchResult(output?.value ?? output)
+          : (output?.value ?? output);
+
         toolResults.push({
           type: 'tool-result',
           toolCallId: part.toolCallId,
           toolName: part.toolName ?? '',
-          result: output?.value ?? output,
-          output,
+          result: trimmedResult,
+          output: trimmedOutput,
         });
       }
       if (toolResults.length > 0) {
@@ -609,7 +715,7 @@ export class ChatService {
     return Math.ceil(text.length / 4);
   }
 
-  private detectLanguageLocally(text: string): 'sinhala' | 'tanglish' | 'english' {
+  private detectLanguageLocally(text: string): 'sinhala' | 'singlish' | 'tanglish' | 'english' {
     if (!text || !text.trim()) {
       return 'english';
     }
@@ -646,7 +752,7 @@ export class ChatService {
 
     // 4. Apply strict classification priority rules
     if (matchedSinglishCount > matchedTanglishCount && matchedSinglishCount > 0) {
-      return 'tanglish';
+      return 'singlish';
     }
     if (matchedTanglishCount > 0) {
       return 'tanglish';
@@ -657,7 +763,7 @@ export class ChatService {
 
   private async translateInput(text: string): Promise<{
     translatedText: string;
-    detectedLanguage: 'sinhala' | 'tanglish' | 'english';
+    detectedLanguage: 'sinhala' | 'singlish' | 'tanglish' | 'english';
   }> {
     const detectedLanguage = this.detectLanguageLocally(text);
 
@@ -670,23 +776,20 @@ export class ChatService {
       this.logger.log(
         `Translating input message (${detectedLanguage}) using ${modelName}...`,
       );
-      const response = await generateText({
-        model: getModelInstance(modelName),
-        prompt: `Translate the following user query from ${
-          detectedLanguage === 'sinhala'
-            ? 'Sinhala (සිංහල script)'
-            : 'Singlish/Tanglish (Sinhala/Tamil transliterated in English script)'
-        } into standard English for e-commerce search.
-
-Here are some examples:
-${
-  detectedLanguage === 'sinhala'
-    ? `User query: "ලස්සන මල් කළඹක් තෝරලා දෙන්න"
+      
+      let sourceLangName = '';
+      let examples = '';
+      
+      if (detectedLanguage === 'sinhala') {
+        sourceLangName = 'Sinhala (සිංහල script)';
+        examples = `User query: "ලස්සන මල් කළඹක් තෝරලා දෙන්න"
 Translation: Select a beautiful flower bouquet for me.
 
 User query: "උපන්දින කේක් වර්ග මොනවාද තියෙන්නේ"
-Translation: What kinds of birthday cakes do you have?`
-    : `User query: "cake monada thiyenne"
+Translation: What kinds of birthday cakes do you have?`;
+      } else if (detectedLanguage === 'singlish') {
+        sourceLangName = 'Singlish (Sinhala transliterated in English script)';
+        examples = `User query: "cake monada thiyenne"
 Translation: What cakes do you have?
 
 User query: "oyala colombo walata delivery karanawada"
@@ -696,8 +799,28 @@ User query: "oyage nama mokakda"
 Translation: What is your name?
 
 User query: "machan"
-Translation: friend`
-}
+Translation: friend`;
+      } else if (detectedLanguage === 'tanglish') {
+        sourceLangName = 'Tanglish (Tamil transliterated in English script or Native Tamil)';
+        examples = `User query: "enaku chocolate cake venum"
+Translation: I want a chocolate cake.
+
+User query: "delivery iruka"
+Translation: Is delivery available?
+
+User query: "nalla cake sollunga"
+Translation: Suggest a good cake.
+
+User query: "macha"
+Translation: friend`;
+      }
+
+      const response = await generateText({
+        model: getModelInstance(modelName),
+        prompt: `Translate the following user query from ${sourceLangName} into standard English for e-commerce search.
+
+Here are some examples:
+${examples}
 
 Now translate the following query. Respond ONLY with the English translation. Do not add any explanation, prefix, or other text.
 
@@ -720,7 +843,7 @@ Query: "${text}"`,
 
   private async translateOutput(
     text: string,
-    targetLang: 'sinhala' | 'tanglish',
+    targetLang: 'sinhala' | 'singlish' | 'tanglish',
   ): Promise<string> {
     if (!text || !text.trim()) return text;
     const modelName = this.getTranslationModelName();
@@ -728,9 +851,10 @@ Query: "${text}"`,
       this.logger.log(
         `Translating assistant output to ${targetLang} using ${modelName}...`,
       );
-      const prompt =
-        targetLang === 'sinhala'
-          ? `Translate the following English e-commerce assistant text into warm, friendly, natural Sinhala (සිංහල). Keep product names, prices (e.g. Rs. 3,500), and product IDs in English.
+      
+      let prompt = '';
+      if (targetLang === 'sinhala') {
+        prompt = `Translate the following English e-commerce assistant text into warm, friendly, natural Sinhala (සිංහල). Keep product names, prices (e.g. Rs. 3,500), and product IDs in English.
 
 Here are some examples of how to translate:
 English Text: "Hello! I am Thisari, your Kapruka shopping assistant. How can I help you today?"
@@ -750,8 +874,9 @@ Translation: "භාර දිය යුතු ලිපිනය සහ සම�
 
 Now translate the following text. Return ONLY the translated Sinhala text. Do not add any introduction, explanations, or notes.
 
-Text: "${text}"`
-          : `Translate the following English e-commerce assistant text into warm, friendly, natural Singlish/Tanglish (Sinhala/Tamil written in English characters, e.g., "oya" instead of "you", "thiyenne" instead of "available", "oyata" instead of "for you"). Keep product names, prices (e.g. Rs. 3,500), and product IDs in English.
+Text: "${text}"`;
+      } else if (targetLang === 'singlish') {
+        prompt = `Translate the following English e-commerce assistant text into warm, friendly, natural Singlish (Sinhala written in English characters/Romanized Sinhala, e.g., "oya" instead of "you", "thiyenne" instead of "available", "oyata" instead of "for you"). Keep product names, prices (e.g. Rs. 3,500), and product IDs in English.
 
 Here are some examples of how to translate:
 English Text: "Hello! I am Thisari, your Kapruka shopping assistant. How can I help you today?"
@@ -769,9 +894,32 @@ Translation: "Oyage order eka successfully place kala! Payment link eka: https:/
 English Text: "What is the delivery address and contact phone number?"
 Translation: "Delivery address eka saha contact phone number eka mokakda?"
 
-Now translate the following text. Return ONLY the translated transliterated text. Do not add any introduction, explanations, or notes.
+Now translate the following text. Return ONLY the translated transliterated Singlish text. Do not add any introduction, explanations, or notes.
 
 Text: "${text}"`;
+      } else if (targetLang === 'tanglish') {
+        prompt = `Translate the following English e-commerce assistant text into warm, friendly, natural Tanglish (Tamil written in English characters/Romanized Tamil, e.g., "unaku" instead of "for you", "irukku" instead of "available", "vaanga" instead of "come"). Keep product names, prices (e.g. Rs. 3,500), and product IDs in English.
+
+Here are some examples of how to translate:
+English Text: "Hello! I am Thisari, your Kapruka shopping assistant. How can I help you today?"
+Translation: "Vanakkam! Naan Thisari, ungaloda Kapruka shopping assistant. Iniku naan ungaluku eppadi help panna mudiyum?"
+
+English Text: "We have some delicious chocolate cakes under Rs. 10,000. Here is a list of items:"
+Translation: "Engakitta Rs. 10,000 kulla nalla chocolate cakes irukku. Idho items list:"
+
+English Text: "Would you like to place an order?"
+Translation: "Neenga order panna virumbureengala?"
+
+English Text: "Your order has been placed successfully! The payment link is: https://example.com"
+Translation: "Unga order successfully place aairuchu! Payment link: https://example.com"
+
+English Text: "What is the delivery address and contact phone number?"
+Translation: "Delivery address matrum contact phone number enna?"
+
+Now translate the following text. Return ONLY the translated transliterated Tanglish text. Do not add any introduction, explanations, or notes.
+
+Text: "${text}"`;
+      }
 
       const response = await generateText({
         model: getModelInstance(modelName),
@@ -791,7 +939,7 @@ Text: "${text}"`;
 
   private processResponseStream(
     inputStream: ReadableStream<Uint8Array>,
-    targetLang: 'sinhala' | 'tanglish' | 'english',
+    targetLang: 'sinhala' | 'singlish' | 'tanglish' | 'english',
     modelName: string,
   ): ReadableStream<Uint8Array> {
     const reader = inputStream.getReader();
@@ -803,7 +951,11 @@ Text: "${text}"`;
     const processText = async (englishText: string): Promise<string> => {
       let resultText = englishText;
       resultText = this.sanitizeIdentity(resultText);
-      if (targetLang === 'sinhala' || targetLang === 'tanglish') {
+      if (
+        targetLang === 'sinhala' ||
+        targetLang === 'singlish' ||
+        targetLang === 'tanglish'
+      ) {
         this.logger.log(
           `Stream translation start: "${englishText.substring(0, 40).replace(/\n/g, ' ')}..."`,
         );
@@ -842,7 +994,11 @@ Text: "${text}"`;
                 try {
                   const textChunk = JSON.parse(line.substring(2));
 
-                  if (targetLang === 'sinhala' || targetLang === 'tanglish') {
+                  if (
+                    targetLang === 'sinhala' ||
+                    targetLang === 'singlish' ||
+                    targetLang === 'tanglish'
+                  ) {
                     sentenceBuffer += textChunk;
                     if (/[.!?\n]/.test(textChunk)) {
                       const toProcess = sentenceBuffer;
@@ -1049,9 +1205,9 @@ Text: "${text}"`;
         .catch(() => {});
     }
 
-    // Detect and translate Sinhala/Tanglish using Gemini
+    // Detect and translate Sinhala/Singlish/Tanglish using Gemini
     const translationResult = await this.translateInput(sanitizedContent);
-    const targetLang = translationResult.detectedLanguage; // 'sinhala' | 'tanglish' | 'english'
+    const targetLang = translationResult.detectedLanguage; // 'sinhala' | 'singlish' | 'tanglish' | 'english'
     const translatedText = translationResult.translatedText;
 
     // Attach translation metadata to the user's message
@@ -1067,6 +1223,11 @@ Text: "${text}"`;
     //   • ModelMessages (role assistant/tool with `content[]` — saved from response.messages in onFinish)
     // `convertToModelMessages` only accepts UIMessages, so we build ModelMessages ourselves.
     const converted = toModelMessages(messages);
+
+    // ── Extract search context for anti-duplication ──────────────────────────
+    // Scan the conversation history for previously shown product IDs and
+    // the last pagination cursor for each query string.
+    const searchContext = extractSearchContext(converted);
 
     // Save initial message history
     if (sessionId) {
@@ -1208,7 +1369,6 @@ Text: "${text}"`;
                 };
                 if (args.category) params.category = args.category;
                 if (args.limit) params.limit = args.limit;
-                if (args.cursor) params.cursor = args.cursor;
                 if (args.min_price !== undefined)
                   params.min_price = args.min_price;
                 if (args.max_price !== undefined)
@@ -1217,15 +1377,44 @@ Text: "${text}"`;
                   params.in_stock_only = args.in_stock_only;
                 if (args.sort) params.sort = args.sort;
 
+                // ── Auto-pagination: inject cursor for repeated queries ──
+                // If the model searched for the same query before and didn't
+                // pass a cursor, auto-inject the last cursor to get next page
+                if (args.cursor) {
+                  params.cursor = args.cursor;
+                } else {
+                  const queryKey = q.trim().toLowerCase();
+                  const savedCursor = searchContext.lastCursorsByQuery.get(queryKey);
+                  if (savedCursor) {
+                    this.logger.log(
+                      `[Tool] Auto-injecting pagination cursor for repeated query "${queryKey}": ${savedCursor}`,
+                    );
+                    params.cursor = savedCursor;
+                  }
+                }
+
                 this.logger.log(
-                  `[Tool] kapruka_search_products: q="${q.trim()}", category=${args.category || 'none'}`,
+                  `[Tool] kapruka_search_products: q="${q.trim()}", category=${args.category || 'none'}, cursor=${params.cursor || 'none'}`,
                 );
                 const result = await callMcpTool('kapruka_search_products', {
                   params,
                 });
                 this.logger.log(
-                  `[Tool] kapruka_search_products returned ${result?.results?.length || 0} results`,
+                  `[Tool] kapruka_search_products returned ${result?.results?.length || 0} results, next_cursor=${result?.next_cursor || 'none'}`,
                 );
+
+                // ── Update search context for subsequent tool calls in the same turn ──
+                if (result?.next_cursor) {
+                  searchContext.lastCursorsByQuery.set(
+                    q.trim().toLowerCase(),
+                    result.next_cursor,
+                  );
+                }
+                if (Array.isArray(result?.results)) {
+                  for (const p of result.results) {
+                    if (p.product_id) searchContext.shownProductIds.add(p.product_id);
+                  }
+                }
 
                 if (sessionId) {
                   this.analyticsService
@@ -1238,6 +1427,8 @@ Text: "${text}"`;
                         query: q.trim(),
                         category: args.category,
                         resultsCount: result?.results?.length || 0,
+                        cursor: params.cursor || null,
+                        nextCursor: result?.next_cursor || null,
                       },
                     })
                     .catch(() => {});
@@ -1576,6 +1767,7 @@ Text: "${text}"`;
                             this.sanitizeIdentity(originalEnglish);
                           if (
                             targetLang === 'sinhala' ||
+                            targetLang === 'singlish' ||
                             targetLang === 'tanglish'
                           ) {
                             processedText = await this.translateOutput(
@@ -1603,6 +1795,7 @@ Text: "${text}"`;
                                 this.sanitizeIdentity(originalEnglish);
                               if (
                                 targetLang === 'sinhala' ||
+                                targetLang === 'singlish' ||
                                 targetLang === 'tanglish'
                               ) {
                                 processedText = await this.translateOutput(

@@ -117,7 +117,7 @@ describe('ChatService', () => {
       expect(generateText).toHaveBeenCalled();
     });
 
-    it('should detect Tanglish text and mock translate', async () => {
+    it('should detect Singlish text and mock translate', async () => {
       (generateText as jest.Mock).mockResolvedValue({
         text: 'show cakes',
       });
@@ -127,6 +127,20 @@ describe('ChatService', () => {
       );
       expect(result).toEqual({
         translatedText: 'show cakes',
+        detectedLanguage: 'singlish',
+      });
+    });
+
+    it('should detect Tanglish text and mock translate', async () => {
+      (generateText as jest.Mock).mockResolvedValue({
+        text: 'I want a chocolate cake, is delivery available?',
+      });
+
+      const result = await (service as any).translateInput(
+        'enaku chocolate cake venum, delivery iruka?',
+      );
+      expect(result).toEqual({
+        translatedText: 'I want a chocolate cake, is delivery available?',
         detectedLanguage: 'tanglish',
       });
     });
