@@ -5,6 +5,8 @@ import { json, urlencoded } from 'express';
 
 const DEFAULT_LOCAL_PORT = 3001;
 const HOST = '0.0.0.0';
+const API_PREFIX = 'api';
+const DEFAULT_PRODUCTION_PUBLIC_URL = 'https://kapruka-server.onrender.com';
 
 function resolvePort(): number {
   const portValue = process.env.PORT;
@@ -26,6 +28,23 @@ function resolvePort(): number {
   return port;
 }
 
+function resolvePublicApiUrl(port: number): string {
+  const configuredPublicUrl =
+    process.env.PUBLIC_API_URL ||
+    process.env.BACKEND_PUBLIC_URL ||
+    process.env.RENDER_EXTERNAL_URL;
+  const baseUrl =
+    configuredPublicUrl ||
+    (process.env.NODE_ENV === 'production'
+      ? DEFAULT_PRODUCTION_PUBLIC_URL
+      : `http://localhost:${port}`);
+  const normalizedBaseUrl = baseUrl.replace(/\/+$/, '');
+
+  return normalizedBaseUrl.endsWith(`/${API_PREFIX}`)
+    ? normalizedBaseUrl
+    : `${normalizedBaseUrl}/${API_PREFIX}`;
+}
+
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
 
@@ -42,7 +61,7 @@ async function bootstrap() {
   });
 
   // Set global endpoint prefix
-  app.setGlobalPrefix('api', {
+  app.setGlobalPrefix(API_PREFIX, {
     exclude: [{ path: 'health', method: RequestMethod.GET }],
   });
 
@@ -56,6 +75,6 @@ async function bootstrap() {
 
   const port = resolvePort();
   await app.listen(port, HOST);
-  console.log(`[NestJS] Backend running on http://${HOST}:${port}/api`);
+  console.log(`[NestJS] Backend running on ${resolvePublicApiUrl(port)}`);
 }
 bootstrap().catch((err) => console.error('Bootstrap failed:', err));
