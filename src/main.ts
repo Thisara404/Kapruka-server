@@ -1,6 +1,6 @@
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module.js';
-import { ValidationPipe } from '@nestjs/common';
+import { RequestMethod, ValidationPipe } from '@nestjs/common';
 import { json, urlencoded } from 'express';
 
 const DEFAULT_LOCAL_PORT = 3001;
@@ -42,7 +42,9 @@ async function bootstrap() {
   });
 
   // Set global endpoint prefix
-  app.setGlobalPrefix('api');
+  app.setGlobalPrefix('api', {
+    exclude: [{ path: 'health', method: RequestMethod.GET }],
+  });
 
   // Enable global validation rules
   app.useGlobalPipes(

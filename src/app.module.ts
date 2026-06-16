@@ -7,6 +7,8 @@ import { UsersModule } from './users/users.module.js';
 import { ChatModule } from './chat/chat.module.js';
 import { AnalyticsModule } from './analytics/analytics.module.js';
 import { DeactivationModule } from './deactivation/deactivation.module.js';
+import { AppController } from './app.controller.js';
+import { AppService } from './app.service.js';
 
 @Module({
   imports: [
@@ -22,5 +24,7 @@ import { DeactivationModule } from './deactivation/deactivation.module.js';
     AnalyticsModule,
     DeactivationModule,
   ],
+  controllers: [AppController],
+  providers: [AppService],
 })
 export class AppModule {}
