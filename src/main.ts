@@ -30,7 +30,7 @@ async function bootstrap() {
   );
 
   const port = process.env.BACKEND_PORT || 3001;
-  await app.listen(, '0.0.0.0');
+  await app.listen(port, '0.0.0.0');
   console.log(`[NestJS] Backend running on http://localhost:${port}/api`);
 }
 bootstrap().catch((err) => console.error('Bootstrap failed:', err));

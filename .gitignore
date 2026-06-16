@@ -1,6 +1,53 @@
-node_modules
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+build/
+coverage/
+
+# Environment files
 .env
-dist
+.env.*
+!.env.example
+!.env.template
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Runtime data
+pids/
+*.pid
+*.seed
+*.pid.lock
+
+# Test and coverage artifacts
+.nyc_output/
+junit.xml
+
+# TypeScript / NestJS cache
+*.tsbuildinfo
+
+# Local tool scratch files
+/scratch_*.js
 /test_translation_direct.js
-/scratch_call_tool.js
-/scratch_list_tools.js
+/test_pagination_api.js
+/mcp_tools*.txt
+/skills-lock.json
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
