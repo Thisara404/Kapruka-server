@@ -34,6 +34,8 @@ junit.xml
 *.tsbuildinfo
 
 # Local tool scratch files
+/scratch_call_tool.js
+
 /scratch_*.js
 /test_translation_direct.js
 /test_pagination_api.js
