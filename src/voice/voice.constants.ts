@@ -62,7 +62,8 @@ export const GEMINI_LIVE_TOOL_DECLARATIONS: GeminiLiveFunctionDeclaration[] = [
   },
   {
     name: 'kapruka_get_product',
-    description: 'Fetch detailed information for a Kapruka product by product ID.',
+    description:
+      'Fetch detailed information for a Kapruka product by product ID.',
     parameters: {
       type: 'OBJECT',
       properties: {
@@ -89,7 +90,8 @@ export const GEMINI_LIVE_TOOL_DECLARATIONS: GeminiLiveFunctionDeclaration[] = [
   },
   {
     name: 'kapruka_list_delivery_cities',
-    description: 'Search or list Sri Lankan cities supported for Kapruka delivery.',
+    description:
+      'Search or list Sri Lankan cities supported for Kapruka delivery.',
     parameters: {
       type: 'OBJECT',
       properties: {
