@@ -10,7 +10,7 @@ export type VoiceStatus =
 
 export type VoiceStatusPayload =
   | { status: 'CONNECTING' | 'READY' | 'CLOSED' }
-  | { status: 'ERROR'; error: string }
+  | { status: 'ERROR'; error: string; retryAfterSeconds?: number }
   | {
       status: 'LIMIT_EXHAUSTED';
       error: 'ALL_CHANNELS_BUSY';

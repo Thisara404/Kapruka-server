@@ -211,19 +211,16 @@ export class VoiceGateway
       if (this.isLimitError(reasonText)) {
         this.rejectForLimit(client);
       } else if (this.sessions.has(client.id)) {
-        if (state.isReady) {
-          this.emitStatus(client, { status: 'CLOSED' });
-        } else {
-          this.logger.warn(
-            `Gemini live socket closed before setupComplete: code=${code}, reason=${reasonText || 'empty'}`,
-          );
-          this.emitStatus(client, {
-            status: 'ERROR',
-            error: reasonText
-              ? `GEMINI_CLOSED: ${reasonText}`
-              : `GEMINI_CLOSED_${code}`,
-          });
-        }
+        this.logger.warn(
+          `Gemini live socket closed ${state.isReady ? 'after READY' : 'before setupComplete'}: code=${code}, reason=${reasonText || 'empty'}`,
+        );
+        this.emitStatus(client, {
+          status: 'ERROR',
+          error: reasonText
+            ? `GEMINI_CLOSED: ${reasonText}`
+            : `GEMINI_CLOSED_${code}`,
+          retryAfterSeconds: 30,
+        });
       }
       this.releaseSession(client.id, false);
       this.disconnectClient(client);
