@@ -7,6 +7,7 @@ import {
   StepTraceEntity,
 } from '../database/entities/index.js';
 import { AnalyticsService } from '../analytics/analytics.service.js';
+import { StepType } from '../database/enums/step-type.enum.js';
 
 // Mock repositories
 const mockSessionRepo = {
@@ -51,6 +52,7 @@ jest.mock('ai', () => {
 });
 
 import { generateText } from 'ai';
+import { callMcpTool } from './mcp-client.js';
 
 describe('ChatService', () => {
   let service: ChatService;
@@ -254,6 +256,73 @@ describe('ChatService', () => {
         ],
         metadata: undefined,
       });
+    });
+  });
+
+  describe('executeVoiceToolCall', () => {
+    it('calls whitelisted MCP tools and saves a successful trace', async () => {
+      const toolResult = { products: [] };
+      (callMcpTool as jest.Mock).mockResolvedValue(toolResult);
+
+      const result = await service.executeVoiceToolCall({
+        sessionId: '123e4567-e89b-12d3-a456-426614174000',
+        turnId: 'turn-1',
+        toolName: 'kapruka_search_products',
+        toolCallId: 'call-1',
+        args: { query: 'tea' },
+      });
+
+      expect(result).toEqual({ ok: true, result: toolResult });
+      expect(callMcpTool).toHaveBeenCalledWith('kapruka_search_products', {
+        params: {
+          response_format: 'json',
+          query: 'tea',
+        },
+      });
+      expect(mockStepTraceRepo.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          turnId: 'turn-1',
+          stepType: StepType.MCP_TOOL_CALL,
+          nodeName: 'kapruka_search_products',
+          inputPayload: expect.objectContaining({
+            toolCallId: 'call-1',
+            params: expect.objectContaining({ query: 'tea' }),
+          }),
+          outputPayload: toolResult,
+          isError: false,
+        }),
+      );
+      expect(mockStepTraceRepo.save).toHaveBeenCalled();
+    });
+
+    it('rejects unknown voice tools and saves an error trace', async () => {
+      const result = await service.executeVoiceToolCall({
+        sessionId: '123e4567-e89b-12d3-a456-426614174000',
+        turnId: 'turn-1',
+        toolName: 'unsafe_tool',
+        toolCallId: 'call-2',
+        args: { query: 'tea' },
+      });
+
+      expect(result).toEqual({
+        ok: false,
+        error: 'Unsupported voice tool: unsafe_tool',
+      });
+      expect(callMcpTool).not.toHaveBeenCalled();
+      expect(mockStepTraceRepo.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          turnId: 'turn-1',
+          stepType: StepType.MCP_TOOL_CALL,
+          nodeName: 'unsafe_tool',
+          inputPayload: expect.objectContaining({
+            query: 'tea',
+            toolCallId: 'call-2',
+          }),
+          outputPayload: null,
+          isError: true,
+          errorMessage: 'Unsupported voice tool: unsafe_tool',
+        }),
+      );
     });
   });
 });

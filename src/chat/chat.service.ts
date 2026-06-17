@@ -21,6 +21,14 @@ import { callMcpTool } from './mcp-client.js';
 import { getSystemPrompt } from './system-prompt.js';
 import { checkRateLimit } from './rate-limiter.js';
 import {
+  KAPRUKA_VOICE_TOOL_NAMES,
+  type KaprukaVoiceToolName,
+} from '../voice/voice.constants.js';
+import type {
+  VoiceToolCallInput,
+  VoiceToolCallResult,
+} from '../voice/voice.types.js';
+import {
   getAvailableModels,
   markModelFailed,
   getModelInstance,
@@ -32,46 +40,201 @@ import {
 
 const SINGLISH_WORDS = new Set([
   // Greetings & Common Polite Words
-  "kohomada", "subha", "dawasak", "ayubowan", "halow", "isthuthi", "sthuthi", "karunakarala",
-  
+  'kohomada',
+  'subha',
+  'dawasak',
+  'ayubowan',
+  'halow',
+  'isthuthi',
+  'sthuthi',
+  'karunakarala',
+
   // Pronouns & People
-  "oyata", "mata", "eyata", "oyala", "mam", "mama", "oya", "eya", "meya", "thama", "ogolla",
-  "machan", "malli", "nangi", "aiya", "akka", "amma", "thaththa", "yaluwa", "mithraya", "thambi",
-  
+  'oyata',
+  'mata',
+  'eyata',
+  'oyala',
+  'mam',
+  'mama',
+  'oya',
+  'eya',
+  'meya',
+  'thama',
+  'ogolla',
+  'machan',
+  'malli',
+  'nangi',
+  'aiya',
+  'akka',
+  'amma',
+  'thaththa',
+  'yaluwa',
+  'mithraya',
+  'thambi',
+
   // Verbs & Action Words (Common colloquial forms)
-  "karanne", "karanna", "karapan", "yanne", "yanna", "yapan", "enna", "enawa", "yanawa", "innawa", 
-  "inna", "innada", "kanawa", "kanne", "kanna", "bonawa", "bonne", "bonna", "kiyanna", 
-  "kiyapan", "hadanna", "hadanawa", "puluwan", "puluwanda", "baha", "nathnam",
-  "awilla", "gihin", "balanna", "balanawa", "danna", "dananawa", "dapan", "damma", "ganna", "gannawa",
-  
+  'karanne',
+  'karanna',
+  'karapan',
+  'yanne',
+  'yanna',
+  'yapan',
+  'enna',
+  'enawa',
+  'yanawa',
+  'innawa',
+  'inna',
+  'innada',
+  'kanawa',
+  'kanne',
+  'kanna',
+  'bonawa',
+  'bonne',
+  'bonna',
+  'kiyanna',
+  'kiyapan',
+  'hadanna',
+  'hadanawa',
+  'puluwan',
+  'puluwanda',
+  'baha',
+  'nathnam',
+  'awilla',
+  'gihin',
+  'balanna',
+  'balanawa',
+  'danna',
+  'dananawa',
+  'dapan',
+  'damma',
+  'ganna',
+  'gannawa',
+
   // Interrogatives (Questions)
-  "mokada", "monada", "kauda", "mokatada", "koheda", "kohomad", "mokakda", "ai", "moko",
-  
+  'mokada',
+  'monada',
+  'kauda',
+  'mokatada',
+  'koheda',
+  'kohomad',
+  'mokakda',
+  'ai',
+  'moko',
+
   // Adjectives & Particles & Conversational Fillers
-  "hari", "naha", "neda", "ane", "anei", "mey", "mokut", "monawahari",
-  "dan", "wela", "velawa", "heta", "ada", "iyye", "thawa", "ithiri", "godak", "chuttak", "poddak",
-  "ela", "patta", "supiri", "maru", "nikan", "awlak", "aulak", "niyamai", "sira", "sirawatama"
+  'hari',
+  'naha',
+  'neda',
+  'ane',
+  'anei',
+  'mey',
+  'mokut',
+  'monawahari',
+  'dan',
+  'wela',
+  'velawa',
+  'heta',
+  'ada',
+  'iyye',
+  'thawa',
+  'ithiri',
+  'godak',
+  'chuttak',
+  'poddak',
+  'ela',
+  'patta',
+  'supiri',
+  'maru',
+  'nikan',
+  'awlak',
+  'aulak',
+  'niyamai',
+  'sira',
+  'sirawatama',
 ]);
 
 const TANGLISH_WORDS = new Set([
   // Greetings & Polite expressions
-  "vanakkam", "nandri", "varuga", "saranam",
-  
+  'vanakkam',
+  'nandri',
+  'varuga',
+  'saranam',
+
   // Pronouns & People
-  "enaku", "unaku", "avan", "ava", "naan", "enga", "nanga", "avanga", "ivanga", "ungaluku",
-  "macha", "machi", "thambi", "anna", "akka", "thala", "nanba", "nanbi", "maama", "mami", "muttal",
-  
+  'enaku',
+  'unaku',
+  'avan',
+  'ava',
+  'naan',
+  'enga',
+  'nanga',
+  'avanga',
+  'ivanga',
+  'ungaluku',
+  'macha',
+  'machi',
+  'thambi',
+  'anna',
+  'akka',
+  'thala',
+  'nanba',
+  'nanbi',
+  'maama',
+  'mami',
+  'muttal',
+
   // Verbs & Common Actions
-  "irukenga", "irukinga", "irukira", "iruku", "irukan", "poda", "ponga", "vanga", 
-  "saptiya", "sapadu", "sollu", "sollunga", "panrenga", "panringa", "varatuma", "varum", "illai", 
-  "ama", "irukku", "poidu", "seyya", "panni", "kelu", "ketingala",
-  
+  'irukenga',
+  'irukinga',
+  'irukira',
+  'iruku',
+  'irukan',
+  'poda',
+  'ponga',
+  'vanga',
+  'saptiya',
+  'sapadu',
+  'sollu',
+  'sollunga',
+  'panrenga',
+  'panringa',
+  'varatuma',
+  'varum',
+  'illai',
+  'ama',
+  'irukku',
+  'poidu',
+  'seyya',
+  'panni',
+  'kelu',
+  'ketingala',
+
   // Interrogatives
-  "epdi", "yaaru", "yenna", "yean", "eppo", "enga", "edhu", "eppadi", "ethana",
-  
+  'epdi',
+  'yaaru',
+  'yenna',
+  'yean',
+  'eppo',
+  'enga',
+  'edhu',
+  'eppadi',
+  'ethana',
+
   // Conversational Modifiers & Slang
-  "semma", "romba", "nalla", "kuda", "vada", "seri", "apdiya", "paravala", "konjam", 
-  "miga", "vegam", "pathu", "theriyum", "theriyathu"
+  'semma',
+  'romba',
+  'nalla',
+  'kuda',
+  'vada',
+  'seri',
+  'apdiya',
+  'paravala',
+  'konjam',
+  'miga',
+  'vegam',
+  'pathu',
+  'theriyum',
+  'theriyathu',
 ]);
 
 /**
@@ -96,7 +259,7 @@ function trimSearchResult(result: any): any {
 
   // If it's a search result with a results array, trim each product
   if (Array.isArray(result.results)) {
-    return {
+    const trimmed: any = {
       total: result.total,
       next_cursor: result.next_cursor || null,
       results: result.results.map((p: any) => ({
@@ -108,6 +271,12 @@ function trimSearchResult(result: any): any {
         // Strip: image_url, description, html_description, browse_url, etc.
       })),
     };
+
+    if (result.totalResults !== undefined) trimmed.totalResults = result.totalResults;
+    if (result.currentPage !== undefined) trimmed.currentPage = result.currentPage;
+    if (result.hasNextPage !== undefined) trimmed.hasNextPage = result.hasNextPage;
+
+    return trimmed;
   }
 
   // If it has a 'value' wrapper (DB-stored format)
@@ -283,9 +452,10 @@ function toModelMessages(messages: any[]): any[] {
           });
           // If the invocation carries the result, collect it for a tool role message
           if (part.state === 'result' && part.result !== undefined) {
-            const trimmedResult = (part.toolName === 'kapruka_search_products')
-              ? trimSearchResult(part.result)
-              : part.result;
+            const trimmedResult =
+              part.toolName === 'kapruka_search_products'
+                ? trimSearchResult(part.result)
+                : part.result;
             pendingToolResults.push({
               type: 'tool-result',
               toolCallId: part.toolCallId,
@@ -337,8 +507,10 @@ function toModelMessages(messages: any[]): any[] {
         }
 
         // Trim search results to keep context lean (strip images, HTML, etc.)
-        const isTrimCandidate = (part.toolName === 'kapruka_search_products');
-        const trimmedOutput = isTrimCandidate ? trimSearchResult(output) : output;
+        const isTrimCandidate = part.toolName === 'kapruka_search_products';
+        const trimmedOutput = isTrimCandidate
+          ? trimSearchResult(output)
+          : output;
         const trimmedResult = isTrimCandidate
           ? trimSearchResult(output?.value ?? output)
           : (output?.value ?? output);
@@ -646,11 +818,13 @@ export class ChatService {
     userPrompt: string,
     metadata: any,
   ): Promise<AgentTurnEntity> {
-    const existing = await this.turnRepo.findOne({
-      where: { sessionId, userPrompt, finalAgentResponse: IsNull() },
-      order: { createdAt: 'DESC' },
-    });
-    if (existing) return existing;
+    if (metadata?.channel !== 'voice') {
+      const existing = await this.turnRepo.findOne({
+        where: { sessionId, userPrompt, finalAgentResponse: IsNull() },
+        order: { createdAt: 'DESC' },
+      });
+      if (existing) return existing;
+    }
 
     const turn = this.turnRepo.create({
       sessionId,
@@ -670,8 +844,101 @@ export class ChatService {
     await this.stepTraceRepo.save(entities);
   }
 
+  async executeVoiceToolCall(
+    input: VoiceToolCallInput,
+  ): Promise<VoiceToolCallResult> {
+    const startedAt = Date.now();
+    let traceInputPayload: Record<string, any> = {
+      ...input.args,
+      toolCallId: input.toolCallId,
+    };
+
+    try {
+      if (!this.isVoiceToolName(input.toolName)) {
+        throw new Error(`Unsupported voice tool: ${input.toolName}`);
+      }
+
+      const toolArgs = this.normalizeVoiceToolArgs(input.toolName, input.args);
+      traceInputPayload = {
+        ...toolArgs,
+        toolCallId: input.toolCallId,
+      };
+
+      const result = await callMcpTool(input.toolName, toolArgs);
+      await this.saveStepTraces(input.turnId, [
+        {
+          stepType: StepType.MCP_TOOL_CALL,
+          nodeName: input.toolName,
+          inputPayload: traceInputPayload,
+          outputPayload: this.toTracePayload(result),
+          executionDurationMs: Date.now() - startedAt,
+          isError: false,
+        },
+      ]);
+
+      return { ok: true, result };
+    } catch (error) {
+      const message = this.errorMessage(error);
+      await this.saveStepTraces(input.turnId, [
+        {
+          stepType: StepType.MCP_TOOL_CALL,
+          nodeName: input.toolName || 'unknown',
+          inputPayload: traceInputPayload,
+          outputPayload: null,
+          executionDurationMs: Date.now() - startedAt,
+          isError: true,
+          errorMessage: message,
+        },
+      ]).catch((traceError) => {
+        this.logger.warn(
+          `Failed to save voice tool trace: ${this.errorMessage(traceError)}`,
+        );
+      });
+
+      return { ok: false, error: message };
+    }
+  }
+
   async deleteByUserId(userId: string): Promise<any> {
     return this.sessionRepo.delete({ externalUserId: userId });
+  }
+
+  private isVoiceToolName(toolName: string): toolName is KaprukaVoiceToolName {
+    return (KAPRUKA_VOICE_TOOL_NAMES as readonly string[]).includes(toolName);
+  }
+
+  private normalizeVoiceToolArgs(
+    _toolName: KaprukaVoiceToolName,
+    args: Record<string, unknown>,
+  ): Record<string, any> {
+    if (this.isRecord(args.params)) {
+      return args as Record<string, any>;
+    }
+
+    return {
+      params: {
+        response_format: 'json',
+        ...args,
+      },
+    };
+  }
+
+  private toTracePayload(value: unknown): Record<string, any> {
+    return this.isRecord(value) ? (value as Record<string, any>) : { value };
+  }
+
+  private errorMessage(value: unknown): string {
+    if (value instanceof Error) return value.message;
+    if (typeof value === 'string') return value;
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return String(value);
+    }
+  }
+
+  private isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === 'object' && value !== null;
   }
 
   private sanitizeIdentity(text: string): string {
@@ -715,7 +982,9 @@ export class ChatService {
     return Math.ceil(text.length / 4);
   }
 
-  private detectLanguageLocally(text: string): 'sinhala' | 'singlish' | 'tanglish' | 'english' {
+  private detectLanguageLocally(
+    text: string,
+  ): 'sinhala' | 'singlish' | 'tanglish' | 'english' {
     if (!text || !text.trim()) {
       return 'english';
     }
@@ -751,7 +1020,10 @@ export class ChatService {
     }
 
     // 4. Apply strict classification priority rules
-    if (matchedSinglishCount > matchedTanglishCount && matchedSinglishCount > 0) {
+    if (
+      matchedSinglishCount > matchedTanglishCount &&
+      matchedSinglishCount > 0
+    ) {
       return 'singlish';
     }
     if (matchedTanglishCount > 0) {
@@ -776,10 +1048,10 @@ export class ChatService {
       this.logger.log(
         `Translating input message (${detectedLanguage}) using ${modelName}...`,
       );
-      
+
       let sourceLangName = '';
       let examples = '';
-      
+
       if (detectedLanguage === 'sinhala') {
         sourceLangName = 'Sinhala (සිංහල script)';
         examples = `User query: "ලස්සන මල් කළඹක් තෝරලා දෙන්න"
@@ -801,7 +1073,8 @@ Translation: What is your name?
 User query: "machan"
 Translation: friend`;
       } else if (detectedLanguage === 'tanglish') {
-        sourceLangName = 'Tanglish (Tamil transliterated in English script or Native Tamil)';
+        sourceLangName =
+          'Tanglish (Tamil transliterated in English script or Native Tamil)';
         examples = `User query: "enaku chocolate cake venum"
 Translation: I want a chocolate cake.
 
@@ -851,7 +1124,7 @@ Query: "${text}"`,
       this.logger.log(
         `Translating assistant output to ${targetLang} using ${modelName}...`,
       );
-      
+
       let prompt = '';
       if (targetLang === 'sinhala') {
         prompt = `Translate the following English e-commerce assistant text into warm, friendly, natural Sinhala (සිංහල). Keep product names, prices (e.g. Rs. 3,500), and product IDs in English.
@@ -1312,6 +1585,12 @@ Text: "${text}"`;
                   .describe(
                     "Sort order: 'relevance', 'price_asc', 'price_desc', 'newest', 'bestseller'",
                   ),
+                page: z
+                  .number()
+                  .optional()
+                  .describe(
+                    "The page number of product results to fetch. Defaults to 1. Increment this value by 1 when the user explicitly requests more alternatives, says 'next page', 'show me other options', or implies they want to see more items than what was previously shown.",
+                  ),
               }),
               execute: async (args: any) => {
                 // Log raw args to debug what the LLM is actually sending
@@ -1382,9 +1661,24 @@ Text: "${text}"`;
                 // pass a cursor, auto-inject the last cursor to get next page
                 if (args.cursor) {
                   params.cursor = args.cursor;
+                } else if (args.page !== undefined && args.page > 1) {
+                  const limit = args.limit || 10;
+                  const offset = limit * (args.page - 1);
+                  const offsetBase64 = Buffer.from(String(offset)).toString('base64');
+                  const generatedCursor = Buffer.from(
+                    JSON.stringify({
+                      u: offsetBase64,
+                      p: args.page,
+                    }),
+                  ).toString('base64');
+                  this.logger.log(
+                    `[Tool] Generating cursor for page ${args.page}: ${generatedCursor}`,
+                  );
+                  params.cursor = generatedCursor;
                 } else {
                   const queryKey = q.trim().toLowerCase();
-                  const savedCursor = searchContext.lastCursorsByQuery.get(queryKey);
+                  const savedCursor =
+                    searchContext.lastCursorsByQuery.get(queryKey);
                   if (savedCursor) {
                     this.logger.log(
                       `[Tool] Auto-injecting pagination cursor for repeated query "${queryKey}": ${savedCursor}`,
@@ -1403,6 +1697,15 @@ Text: "${text}"`;
                   `[Tool] kapruka_search_products returned ${result?.results?.length || 0} results, next_cursor=${result?.next_cursor || 'none'}`,
                 );
 
+                const currentPage = args.page || 1;
+                const limit = args.limit || 10;
+                const enrichedResult = {
+                  ...result,
+                  currentPage,
+                  totalResults: result?.results?.length ? (result.results.length < limit && currentPage === 1 ? result.results.length : undefined) : 0,
+                  hasNextPage: !!result?.next_cursor,
+                };
+
                 // ── Update search context for subsequent tool calls in the same turn ──
                 if (result?.next_cursor) {
                   searchContext.lastCursorsByQuery.set(
@@ -1412,7 +1715,8 @@ Text: "${text}"`;
                 }
                 if (Array.isArray(result?.results)) {
                   for (const p of result.results) {
-                    if (p.product_id) searchContext.shownProductIds.add(p.product_id);
+                    if (p.product_id)
+                      searchContext.shownProductIds.add(p.product_id);
                   }
                 }
 
@@ -1429,12 +1733,15 @@ Text: "${text}"`;
                         resultsCount: result?.results?.length || 0,
                         cursor: params.cursor || null,
                         nextCursor: result?.next_cursor || null,
+                        currentPage,
+                        totalResults: enrichedResult.totalResults || null,
+                        hasNextPage: enrichedResult.hasNextPage,
                       },
                     })
                     .catch(() => {});
                 }
 
-                return result;
+                return enrichedResult;
               },
             } as any),
 
@@ -1929,9 +2236,12 @@ Text: "${text}"`;
               const { done, value } = await reader.read();
               if (done) break;
               probedChunks.push(value);
-              
+
               const text = new TextDecoder().decode(value);
-              if (text.includes('"type":"error"') || text.includes('"errorText"')) {
+              if (
+                text.includes('"type":"error"') ||
+                text.includes('"errorText"')
+              ) {
                 streamFailed = true;
                 streamError = new Error(text);
                 break;

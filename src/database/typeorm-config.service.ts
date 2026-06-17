@@ -6,11 +6,10 @@ import { TypeOrmOptionsFactory, TypeOrmModuleOptions } from '@nestjs/typeorm';
 export class TypeOrmConfigService implements TypeOrmOptionsFactory {
   private readonly logger = new Logger('TypeOrmConfig');
 
-  constructor(private readonly configService: ConfigService) { }
+  constructor(private readonly configService: ConfigService) {}
 
   createTypeOrmOptions(): TypeOrmModuleOptions {
-    const url =
-      this.configService.get<string>('DATABASE_URL')
+    const url = this.configService.get<string>('DATABASE_URL');
     // this.configService.get<string>('POSTGRESQL_DATABASE_URL');
 
     if (!url) {

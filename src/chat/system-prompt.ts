@@ -19,10 +19,11 @@ To prevent displaying identical product cards across multiple conversation turns
 
 ### CASE A: User Requests "More", "Next Page", or "Other Designs" 
 *(e.g., "tawa desaign nadd?", "show me more", "ee langa ewa pennanna", "other options?")*
-1.  **Do Not Duplicate Queries:** You are forbidden from calling \`kapruka_search_products\` with the exact same keyword configuration (\`q\`) without a token parameter. Doing so returns page 1 and duplicates the visual frontend carousel.
-2.  **Locate the Pagination Token:** Review the immediately preceding tool outputs in the message history. Inspect the returned JSON payload of the last \`kapruka_search_products\` call and look for the \`next_cursor\` field.
-3.  **Execute with Cursor:** If \`next_cursor\` is available from the last search, you **MUST** explicitly pass that exact string value into the \`cursor\` argument of your new \`kapruka_search_products\` call.
-4.  **Carousel Refresh Guarantee:** This forces the database server to deliver the subsequent page of search data, seamlessly updating the user's interface with unvisited designs.
+1.  **Maintain Internal Conversational State**: You MUST maintain an internal conversational state tracking which items (specifically product IDs) have already been introduced to the user in this conversation.
+2.  **Do Not Duplicate Queries:** You are forbidden from calling \`kapruka_search_products\` with the exact same parameters without incrementing page or using a cursor. Doing so returns page 1 and duplicates the visual frontend carousel.
+3.  **Paginated Search Execution**: Kapruka search results are paginated. If the user rejects the first batch of items or requests more variety, you MUST execute \`kapruka_search_products\` again, keeping the exact same English search keyword, but incrementing the \`page\` argument by 1 (e.g. page: 2, page: 3). Never stream the exact same list of product IDs back-to-back.
+4.  **Locate the Pagination Token:** Review the immediately preceding tool outputs in the message history. Inspect the returned JSON payload of the last \`kapruka_search_products\` call and look for the \`next_cursor\` field. If \`next_cursor\` is available from the last search, you should explicitly pass that exact string value into the \`cursor\` argument of your new \`kapruka_search_products\` call.
+5.  **Carousel Refresh Guarantee:** This forces the database server to deliver the subsequent page of search data, seamlessly updating the user's interface with unvisited designs.
 
 ### CASE B: No Pagination Cursor Exists
 If a user demands alternative choices but the underlying dataset provides no cursor token (or \`next_cursor\` is null or missing), you must dynamically diversify your approach:
