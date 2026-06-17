@@ -1,4 +1,5 @@
 import type WebSocket from 'ws';
+import type { GeminiLiveContent } from './gemini-live.types.js';
 
 export type VoiceStatus =
   | 'CONNECTING'
@@ -10,7 +11,11 @@ export type VoiceStatus =
 export type VoiceStatusPayload =
   | { status: 'CONNECTING' | 'READY' | 'CLOSED' }
   | { status: 'ERROR'; error: string }
-  | { status: 'LIMIT_EXHAUSTED'; error: 'ALL_CHANNELS_BUSY' };
+  | {
+      status: 'LIMIT_EXHAUSTED';
+      error: 'ALL_CHANNELS_BUSY';
+      retryAfterSeconds?: number;
+    };
 
 export interface VoiceAuthPayload {
   sessionId?: string;
@@ -28,7 +33,9 @@ export interface ActiveVoiceSession {
   turnId: string;
   userId?: string;
   googleSocket: WebSocket;
+  history: GeminiLiveContent[];
   isReady: boolean;
+  isToolCallInFlight: boolean;
   isReleased: boolean;
   createdAt: number;
 }

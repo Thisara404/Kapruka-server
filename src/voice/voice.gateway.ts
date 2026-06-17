@@ -1,6 +1,7 @@
 import { Logger, OnModuleDestroy } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
+import { InjectRepository } from '@nestjs/typeorm';
 import {
   ConnectedSocket,
   MessageBody,
@@ -10,17 +11,22 @@ import {
   WebSocketGateway,
 } from '@nestjs/websockets';
 import type { Socket } from 'socket.io';
+import { IsNull, Not, Repository } from 'typeorm';
 import WebSocket, { type RawData } from 'ws';
 import { ChatService } from '../chat/chat.service.js';
+import { AgentTurnEntity } from '../database/entities/index.js';
 import {
   DEFAULT_GEMINI_LIVE_MAX_SESSIONS,
   DEFAULT_GEMINI_LIVE_MODEL,
   DEFAULT_MAX_AUDIO_CHUNK_BYTES,
   GEMINI_AUDIO_INPUT_MIME_TYPE,
+  GEMINI_LIVE_TOOL_DECLARATIONS,
   GEMINI_LIVE_WS_ENDPOINT,
+  THISARI_VOICE_SYSTEM_INSTRUCTION,
 } from './voice.constants.js';
 import type {
   GeminiLiveClientMessage,
+  GeminiLiveContent,
   GeminiLiveFunctionCall,
   GeminiLiveFunctionResponse,
   GeminiLiveServerMessage,
@@ -34,6 +40,9 @@ import type {
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const DEFAULT_HISTORY_TURN_LIMIT = 8;
+const MIN_HISTORY_TURN_LIMIT = 6;
+const MAX_HISTORY_TURN_LIMIT = 10;
 
 @WebSocketGateway({
   namespace: '/voice',
@@ -50,6 +59,8 @@ export class VoiceGateway
     private readonly configService: ConfigService,
     private readonly chatService: ChatService,
     private readonly jwtService: JwtService,
+    @InjectRepository(AgentTurnEntity)
+    private readonly turnRepo: Repository<AgentTurnEntity>,
   ) {}
 
   async handleConnection(client: Socket): Promise<void> {
@@ -83,6 +94,7 @@ export class VoiceGateway
     try {
       const userId = await this.resolveUserId(auth.token);
       await this.chatService.findOrCreateSession(sessionId, userId);
+      const history = await this.loadGeminiHistory(sessionId);
       const turn = await this.chatService.saveInitialTurn(
         sessionId,
         '[voice session]',
@@ -96,7 +108,9 @@ export class VoiceGateway
         turnId: turn.id,
         userId,
         googleSocket,
+        history,
         isReady: false,
+        isToolCallInFlight: false,
         isReleased: false,
         createdAt: Date.now(),
       };
@@ -173,7 +187,7 @@ export class VoiceGateway
 
   private bindGeminiSocket(client: Socket, state: ActiveVoiceSession): void {
     state.googleSocket.on('open', () => {
-      this.sendGemini(state, this.buildSetupMessage());
+      this.sendGemini(state, this.buildSetupMessage(state.history));
     });
 
     state.googleSocket.on('message', (data) => {
@@ -192,12 +206,24 @@ export class VoiceGateway
       this.releaseSession(client.id, true);
     });
 
-    state.googleSocket.on('close', (_code, reason) => {
+    state.googleSocket.on('close', (code, reason) => {
       const reasonText = reason.toString('utf8');
       if (this.isLimitError(reasonText)) {
         this.rejectForLimit(client);
       } else if (this.sessions.has(client.id)) {
-        this.emitStatus(client, { status: 'CLOSED' });
+        if (state.isReady) {
+          this.emitStatus(client, { status: 'CLOSED' });
+        } else {
+          this.logger.warn(
+            `Gemini live socket closed before setupComplete: code=${code}, reason=${reasonText || 'empty'}`,
+          );
+          this.emitStatus(client, {
+            status: 'ERROR',
+            error: reasonText
+              ? `GEMINI_CLOSED: ${reasonText}`
+              : `GEMINI_CLOSED_${code}`,
+          });
+        }
       }
       this.releaseSession(client.id, false);
       this.disconnectClient(client);
@@ -248,11 +274,19 @@ export class VoiceGateway
     }
 
     if (message.toolCall) {
-      await this.handleToolCall(state, message.toolCall.functionCalls ?? []);
+      state.isToolCallInFlight = true;
+      try {
+        await this.handleToolCall(state, message.toolCall.functionCalls ?? []);
+      } finally {
+        state.isToolCallInFlight = false;
+      }
       return; // Intercept immediately and halt downstream audio-out emissions
     }
 
     if (message.serverContent) {
+      if (state.isToolCallInFlight) {
+        return;
+      }
       this.forwardServerContent(client, message);
     }
   }
@@ -314,9 +348,10 @@ export class VoiceGateway
       });
 
       functionResponses.push({
+        name: toolName,
         id: toolCallId,
         response: result.ok
-          ? { output: result.result ?? null }
+          ? { result: result.result ?? null }
           : { error: result.error ?? 'TOOL_FAILED' },
       });
     }
@@ -328,74 +363,105 @@ export class VoiceGateway
     }
   }
 
-  private buildSetupMessage(): GeminiLiveClientMessage {
+  private buildSetupMessage(
+    history: GeminiLiveContent[],
+  ): GeminiLiveClientMessage {
     return {
       setup: {
-        model: 'models/gemini-3.1-flash-live-preview',
+        model: this.getModelPath(),
         generationConfig: {
           responseModalities: ['AUDIO'],
+          candidateCount: 1,
         },
         systemInstruction: {
           parts: [
             {
-              text: "You are Thisari, an empathetic Kapruka shopping assistant. You have access to real-time inventory and delivery tools. If a user asks for an item, cake, flowers, or essentials, you MUST call the appropriate tool instantly without explaining your internal actions to the user or asking for permission. You converse in the user's language, but your internal tool arguments must be translated into English queries. Kapruka search results are paginated. Maintain an internal conversational state tracking which items have already been introduced. If the user rejects the first batch of items or requests more variety, you MUST execute `kapruka_search_products` again, keeping the exact same English search keyword, but incrementing the `page` argument by 1. Never stream the exact same list of product IDs back-to-back.",
+              text: THISARI_VOICE_SYSTEM_INSTRUCTION,
             },
           ],
         },
         tools: [
           {
-            functionDeclarations: [
-              {
-                name: 'kapruka_search_products',
-                description:
-                  'Search Kapruka products by query/keyword. Keep search queries in English.',
-                parameters: {
-                  type: 'OBJECT',
-                  properties: {
-                    q: {
-                      type: 'STRING',
-                      description:
-                        "The extracted product search keyword translated to English, e.g., 'red flowers', 'birthday cake'.",
-                    },
-                    page: {
-                      type: 'INTEGER',
-                      description:
-                        "The page number of product results to fetch. Defaults to 1. Increment this value by 1 when the user explicitly requests more alternatives, says 'next page', 'show me other options', or implies they want to see more items than what was previously shown.",
-                    },
-                  },
-                  required: ['q'],
-                },
-              },
-              {
-                name: 'kapruka_check_delivery',
-                description:
-                  'Check whether Kapruka can deliver to a Sri Lankan city on a specific date.',
-                parameters: {
-                  type: 'OBJECT',
-                  properties: {
-                    city: {
-                      type: 'STRING',
-                      description: 'The target city name in Sri Lanka.',
-                    },
-                    date: {
-                      type: 'STRING',
-                      description:
-                        'The target delivery date in YYYY-MM-DD format.',
-                    },
-                    productId: {
-                      type: 'STRING',
-                      description:
-                        'Optional product ID to check delivery eligibility for.',
-                    },
-                  },
-                  required: ['city', 'date'],
-                },
-              },
-            ],
+            functionDeclarations: GEMINI_LIVE_TOOL_DECLARATIONS,
           },
         ],
+        history,
       },
     };
+  }
+
+  private async loadGeminiHistory(
+    sessionId: string,
+  ): Promise<GeminiLiveContent[]> {
+    const turns = await this.turnRepo.find({
+      where: {
+        sessionId,
+        userPrompt: Not('[voice session]'),
+        finalAgentResponse: Not(IsNull()),
+      },
+      order: { createdAt: 'DESC' },
+      take: this.getHistoryTurnLimit(),
+    });
+
+    return this.mapTurnsToGeminiHistory(turns.reverse());
+  }
+
+  private mapTurnsToGeminiHistory(
+    turns: AgentTurnEntity[],
+  ): GeminiLiveContent[] {
+    const history: GeminiLiveContent[] = [];
+
+    for (const turn of turns) {
+      const userText = this.formatUserHistoryText(turn);
+      if (userText) {
+        history.push({ role: 'user', parts: [{ text: userText }] });
+      }
+
+      const modelText = this.formatModelHistoryText(turn);
+      if (modelText) {
+        history.push({ role: 'model', parts: [{ text: modelText }] });
+      }
+    }
+
+    return history;
+  }
+
+  private formatUserHistoryText(turn: AgentTurnEntity): string | undefined {
+    const prompt = turn.userPrompt?.trim();
+    if (!prompt || prompt === '[voice session]') return undefined;
+
+    const metadata = turn.metadata ?? {};
+    const originalText = this.stringValue(metadata.originalText) ?? prompt;
+    const englishText = this.stringValue(metadata.englishText);
+    const detectedLanguage = this.stringValue(metadata.detectedLanguage);
+
+    if (englishText && englishText !== originalText) {
+      return [
+        `User message${detectedLanguage ? ` (${detectedLanguage})` : ''}: ${originalText}`,
+        `English meaning: ${englishText}`,
+      ].join('\n');
+    }
+
+    return originalText;
+  }
+
+  private formatModelHistoryText(turn: AgentTurnEntity): string | undefined {
+    const response = turn.finalAgentResponse?.trim();
+    if (!response) return undefined;
+
+    const metadata = turn.metadata ?? {};
+    const englishText =
+      this.stringValue(metadata.assistantEnglishText) ??
+      this.stringValue(metadata.englishText);
+
+    if (englishText && englishText !== response) {
+      return [
+        `Assistant response shown to user: ${response}`,
+        `English source: ${englishText}`,
+      ].join('\n');
+    }
+
+    return response;
   }
 
   private sendGemini(
@@ -436,6 +502,7 @@ export class VoiceGateway
     this.emitStatus(client, {
       status: 'LIMIT_EXHAUSTED',
       error: 'ALL_CHANNELS_BUSY',
+      retryAfterSeconds: 30,
     });
     this.disconnectClient(client);
   }
@@ -467,9 +534,15 @@ export class VoiceGateway
       ? client.handshake.query
       : {};
     const authorization = client.handshake.headers.authorization;
+    const headerSessionId =
+      this.stringValue(client.handshake.headers['x-session-id']) ??
+      this.stringValue(client.handshake.headers['session-id']) ??
+      this.stringValue(client.handshake.headers['x-kapruka-session-id']);
 
     const sessionId =
-      this.stringValue(auth.sessionId) ?? this.stringValue(query.sessionId);
+      this.stringValue(auth.sessionId) ??
+      this.stringValue(query.sessionId) ??
+      headerSessionId;
     const token =
       this.stringValue(auth.token) ??
       this.stringValue(query.token) ??
@@ -505,6 +578,11 @@ export class VoiceGateway
     );
   }
 
+  private getModelPath(): string {
+    const model = this.getModel().trim();
+    return model.startsWith('models/') ? model : `models/${model}`;
+  }
+
   private getMaxSessions(): number {
     const configured = Number(
       this.configService.get<string>('GEMINI_LIVE_MAX_SESSIONS'),
@@ -521,6 +599,19 @@ export class VoiceGateway
     return Number.isFinite(configured) && configured > 0
       ? configured
       : DEFAULT_MAX_AUDIO_CHUNK_BYTES;
+  }
+
+  private getHistoryTurnLimit(): number {
+    const configured = Number(
+      this.configService.get<string>('GEMINI_LIVE_HISTORY_TURNS'),
+    );
+    if (!Number.isFinite(configured) || configured <= 0) {
+      return DEFAULT_HISTORY_TURN_LIMIT;
+    }
+    return Math.min(
+      MAX_HISTORY_TURN_LIMIT,
+      Math.max(MIN_HISTORY_TURN_LIMIT, Math.floor(configured)),
+    );
   }
 
   private toAudioBuffer(payload: unknown): Buffer | null {

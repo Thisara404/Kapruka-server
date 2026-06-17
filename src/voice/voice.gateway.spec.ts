@@ -85,6 +85,7 @@ describe('VoiceGateway', () => {
     executeVoiceToolCall: jest.Mock;
   };
   let jwtService: { verifyAsync: jest.Mock };
+  let turnRepo: { find: jest.Mock };
   let socketCounter = 0;
 
   const webSocketInstances = () =>
@@ -145,10 +146,14 @@ describe('VoiceGateway', () => {
     jwtService = {
       verifyAsync: jest.fn().mockResolvedValue({ sub: 'user-1' }),
     };
+    turnRepo = {
+      find: jest.fn().mockResolvedValue([]),
+    };
     gateway = new VoiceGateway(
       configService as unknown as ConfigService,
       chatService as unknown as ChatService,
       jwtService as unknown as JwtService,
+      turnRepo as any,
     );
   });
 
@@ -182,6 +187,7 @@ describe('VoiceGateway', () => {
     expect(fourthClient.emit).toHaveBeenCalledWith('voice-status', {
       status: 'LIMIT_EXHAUSTED',
       error: 'ALL_CHANNELS_BUSY',
+      retryAfterSeconds: 30,
     });
     expect(fourthClient.disconnect).toHaveBeenCalledWith(true);
     expect(webSocketInstances()).toHaveLength(3);
@@ -197,6 +203,7 @@ describe('VoiceGateway', () => {
     expect(client.emit).toHaveBeenCalledWith('voice-status', {
       status: 'LIMIT_EXHAUSTED',
       error: 'ALL_CHANNELS_BUSY',
+      retryAfterSeconds: 30,
     });
     expect(client.disconnect).toHaveBeenCalledWith(true);
   });
@@ -236,6 +243,120 @@ describe('VoiceGateway', () => {
         },
       },
     });
+  });
+
+  it('hydrates the Gemini setup frame with chronological chat history', async () => {
+    turnRepo.find.mockResolvedValue([
+      {
+        sessionId: validSessionId,
+        userPrompt: 'mata tea ona',
+        finalAgentResponse: 'Menna tea items dekak.',
+        metadata: {
+          originalText: 'mata tea ona',
+          englishText: 'I want tea',
+          detectedLanguage: 'singlish',
+          assistantEnglishText: 'Here are two tea items.',
+        },
+        createdAt: new Date('2026-06-18T10:01:00.000Z'),
+      },
+      {
+        sessionId: validSessionId,
+        userPrompt: 'Show me categories',
+        finalAgentResponse: 'Here are 11 categories: Cakes, Flowers, Tea.',
+        metadata: null,
+        createdAt: new Date('2026-06-18T10:00:00.000Z'),
+      },
+    ]);
+    const client = makeSocket();
+
+    await gateway.handleConnection(client);
+    const googleSocket = latestWebSocket();
+    googleSocket.emitOpen();
+
+    expect(turnRepo.find).toHaveBeenCalledWith({
+      where: expect.objectContaining({
+        sessionId: validSessionId,
+        userPrompt: expect.any(Object),
+        finalAgentResponse: expect.any(Object),
+      }),
+      order: { createdAt: 'DESC' },
+      take: 8,
+    });
+    expect(
+      chatService.saveInitialTurn.mock.invocationCallOrder[0],
+    ).toBeGreaterThan(turnRepo.find.mock.invocationCallOrder[0]);
+
+    const setupMessage = JSON.parse(googleSocket.sent[0]);
+    expect(setupMessage.setup.model).toBe(
+      'models/gemini-3.1-flash-live-preview',
+    );
+    expect(setupMessage.setup.generationConfig).toEqual({
+      responseModalities: ['AUDIO'],
+      candidateCount: 1,
+    });
+    expect(setupMessage.setup.systemInstruction.parts[0].text).toContain(
+      'strictly forbidden from writing or reciting lists of specific products',
+    );
+    expect(setupMessage.setup.tools[0].functionDeclarations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: 'kapruka_search_products' }),
+        expect.objectContaining({ name: 'kapruka_list_categories' }),
+        expect.objectContaining({ name: 'kapruka_create_order' }),
+      ]),
+    );
+    expect(setupMessage.setup.history).toEqual([
+      {
+        role: 'user',
+        parts: [{ text: 'Show me categories' }],
+      },
+      {
+        role: 'model',
+        parts: [{ text: 'Here are 11 categories: Cakes, Flowers, Tea.' }],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            text: [
+              'User message (singlish): mata tea ona',
+              'English meaning: I want tea',
+            ].join('\n'),
+          },
+        ],
+      },
+      {
+        role: 'model',
+        parts: [
+          {
+            text: [
+              'Assistant response shown to user: Menna tea items dekak.',
+              'English source: Here are two tea items.',
+            ].join('\n'),
+          },
+        ],
+      },
+    ]);
+  });
+
+  it('does not duplicate a models/ prefix from GEMINI_LIVE_MODEL', async () => {
+    configService.get.mockImplementation((key: string) => {
+      const values: Record<string, string> = {
+        GEMINI_LIVE_API_KEY: 'test-key',
+        GEMINI_LIVE_MODEL: 'models/gemini-3.1-flash-live-preview',
+        GEMINI_LIVE_MAX_SESSIONS: '3',
+      };
+      return values[key];
+    });
+    const client = makeSocket();
+
+    await gateway.handleConnection(client);
+    const googleSocket = latestWebSocket();
+    googleSocket.emitOpen();
+
+    const setupMessage = JSON.parse(googleSocket.sent[0]);
+    expect(setupMessage.setup.model).toBe(
+      'models/gemini-3.1-flash-live-preview',
+    );
   });
 
   it('emits Gemini inlineData audio as audio-output Buffer', async () => {
@@ -299,11 +420,62 @@ describe('VoiceGateway', () => {
       toolResponse: {
         functionResponses: [
           {
+            name: 'kapruka_search_products',
             id: 'call-1',
-            response: { output: { products: [] } },
+            response: { result: { products: [] } },
           },
         ],
       },
+    });
+  });
+
+  it('pauses server content forwarding while a tool call is in flight', async () => {
+    let resolveToolCall: (value: { ok: true; result: { products: never[] } }) => void;
+    chatService.executeVoiceToolCall.mockReturnValue(
+      new Promise((resolve) => {
+        resolveToolCall = resolve;
+      }),
+    );
+    const client = makeSocket();
+    await gateway.handleConnection(client);
+    const googleSocket = latestWebSocket();
+
+    googleSocket.emitOpen();
+    googleSocket.emitMessage({ setupComplete: {} });
+    googleSocket.emitMessage({
+      toolCall: {
+        functionCalls: [
+          {
+            id: 'call-2',
+            name: 'kapruka_search_products',
+            args: { query: 'flowers' },
+          },
+        ],
+      },
+    });
+    googleSocket.emitMessage({
+      serverContent: {
+        modelTurn: {
+          parts: [{ text: 'Here are product options that should not leak.' }],
+        },
+      },
+    });
+
+    expect(client.emit).not.toHaveBeenCalledWith('voice-transcript', {
+      source: 'model',
+      text: 'Here are product options that should not leak.',
+    });
+
+    resolveToolCall!({ ok: true, result: { products: [] } });
+    await flush();
+
+    const toolResponse = JSON.parse(
+      googleSocket.sent[googleSocket.sent.length - 1],
+    );
+    expect(toolResponse.toolResponse.functionResponses[0]).toEqual({
+      name: 'kapruka_search_products',
+      id: 'call-2',
+      response: { result: { products: [] } },
     });
   });
 });

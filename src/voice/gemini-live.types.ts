@@ -22,11 +22,17 @@ export interface GeminiLiveFunctionDeclaration {
   parameters: GeminiLiveJsonSchema;
 }
 
+export interface GeminiLiveContent {
+  role: 'user' | 'model';
+  parts: Array<{ text: string }>;
+}
+
 export interface GeminiLiveSetupMessage {
   setup: {
     model: string;
     generationConfig: {
       responseModalities: GeminiLiveResponseModality[];
+      candidateCount?: number;
     };
     systemInstruction: {
       parts: Array<{ text: string }>;
@@ -34,6 +40,7 @@ export interface GeminiLiveSetupMessage {
     tools: Array<{
       functionDeclarations: GeminiLiveFunctionDeclaration[];
     }>;
+    history: GeminiLiveContent[];
   };
 }
 
