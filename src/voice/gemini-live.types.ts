@@ -40,7 +40,13 @@ export interface GeminiLiveSetupMessage {
     tools: Array<{
       functionDeclarations: GeminiLiveFunctionDeclaration[];
     }>;
-    history: GeminiLiveContent[];
+  };
+}
+
+export interface GeminiLiveClientContentMessage {
+  clientContent: {
+    turns: GeminiLiveContent[];
+    turnComplete: boolean;
   };
 }
 
@@ -118,5 +124,6 @@ export interface GeminiLiveToolResponseMessage {
 
 export type GeminiLiveClientMessage =
   | GeminiLiveSetupMessage
+  | GeminiLiveClientContentMessage
   | GeminiLiveRealtimeInputMessage
   | GeminiLiveToolResponseMessage;

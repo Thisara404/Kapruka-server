@@ -187,7 +187,7 @@ export class VoiceGateway
 
   private bindGeminiSocket(client: Socket, state: ActiveVoiceSession): void {
     state.googleSocket.on('open', () => {
-      this.sendGemini(state, this.buildSetupMessage(state.history));
+      this.sendGemini(state, this.buildSetupMessage());
     });
 
     state.googleSocket.on('message', (data) => {
@@ -269,6 +269,7 @@ export class VoiceGateway
     }
 
     if (message.setupComplete) {
+      this.hydrateGeminiHistory(state);
       state.isReady = true;
       this.emitStatus(client, { status: 'READY' });
     }
@@ -363,9 +364,7 @@ export class VoiceGateway
     }
   }
 
-  private buildSetupMessage(
-    history: GeminiLiveContent[],
-  ): GeminiLiveClientMessage {
+  private buildSetupMessage(): GeminiLiveClientMessage {
     return {
       setup: {
         model: this.getModelPath(),
@@ -385,9 +384,21 @@ export class VoiceGateway
             functionDeclarations: GEMINI_LIVE_TOOL_DECLARATIONS,
           },
         ],
-        history,
       },
     };
+  }
+
+  private hydrateGeminiHistory(state: ActiveVoiceSession): void {
+    if (state.history.length === 0) {
+      return;
+    }
+
+    this.sendGemini(state, {
+      clientContent: {
+        turns: state.history,
+        turnComplete: false,
+      },
+    });
   }
 
   private async loadGeminiHistory(

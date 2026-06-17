@@ -272,6 +272,9 @@ describe('VoiceGateway', () => {
     await gateway.handleConnection(client);
     const googleSocket = latestWebSocket();
     googleSocket.emitOpen();
+    const setupMessage = JSON.parse(googleSocket.sent[0]);
+    expect(setupMessage.setup.history).toBeUndefined();
+    googleSocket.emitMessage({ setupComplete: {} });
 
     expect(turnRepo.find).toHaveBeenCalledWith({
       where: expect.objectContaining({
@@ -286,7 +289,6 @@ describe('VoiceGateway', () => {
       chatService.saveInitialTurn.mock.invocationCallOrder[0],
     ).toBeGreaterThan(turnRepo.find.mock.invocationCallOrder[0]);
 
-    const setupMessage = JSON.parse(googleSocket.sent[0]);
     expect(setupMessage.setup.model).toBe(
       'models/gemini-3.1-flash-live-preview',
     );
@@ -304,7 +306,11 @@ describe('VoiceGateway', () => {
         expect.objectContaining({ name: 'kapruka_create_order' }),
       ]),
     );
-    expect(setupMessage.setup.history).toEqual([
+
+    const historyMessage = JSON.parse(googleSocket.sent[1]);
+    expect(historyMessage.clientContent).toEqual({
+      turnComplete: false,
+      turns: [
       {
         role: 'user',
         parts: [{ text: 'Show me categories' }],
@@ -335,7 +341,8 @@ describe('VoiceGateway', () => {
           },
         ],
       },
-    ]);
+      ],
+    });
   });
 
   it('does not duplicate a models/ prefix from GEMINI_LIVE_MODEL', async () => {
