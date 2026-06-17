@@ -27,6 +27,14 @@ export interface VoiceTranscriptPayload {
   text: string;
 }
 
+export interface VoiceToolResultPayload {
+  toolCallId: string;
+  toolName: string;
+  state: 'result' | 'error';
+  result?: unknown;
+  error?: string;
+}
+
 export interface ActiveVoiceSession {
   socketId: string;
   sessionId: string;

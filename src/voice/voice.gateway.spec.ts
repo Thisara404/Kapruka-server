@@ -425,6 +425,13 @@ describe('VoiceGateway', () => {
       toolCallId: 'call-1',
       args: { query: 'tea' },
     });
+    expect(client.emit).toHaveBeenCalledWith('voice-tool-result', {
+      toolCallId: 'call-1',
+      toolName: 'kapruka_search_products',
+      state: 'result',
+      result: { products: [] },
+      error: undefined,
+    });
 
     const toolResponse = JSON.parse(
       googleSocket.sent[googleSocket.sent.length - 1],

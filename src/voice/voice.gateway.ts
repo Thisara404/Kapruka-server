@@ -35,6 +35,7 @@ import type {
   ActiveVoiceSession,
   VoiceAuthPayload,
   VoiceStatusPayload,
+  VoiceToolResultPayload,
   VoiceTranscriptPayload,
 } from './voice.types.js';
 
@@ -274,7 +275,11 @@ export class VoiceGateway
     if (message.toolCall) {
       state.isToolCallInFlight = true;
       try {
-        await this.handleToolCall(state, message.toolCall.functionCalls ?? []);
+        await this.handleToolCall(
+          client,
+          state,
+          message.toolCall.functionCalls ?? [],
+        );
       } finally {
         state.isToolCallInFlight = false;
       }
@@ -325,6 +330,7 @@ export class VoiceGateway
   }
 
   private async handleToolCall(
+    client: Socket,
     state: ActiveVoiceSession,
     functionCalls: GeminiLiveFunctionCall[],
   ): Promise<void> {
@@ -345,6 +351,14 @@ export class VoiceGateway
         args,
       });
 
+      this.emitToolResult(client, {
+        toolCallId,
+        toolName,
+        state: result.ok ? 'result' : 'error',
+        result: result.result ?? null,
+        error: result.error,
+      });
+
       functionResponses.push({
         name: toolName,
         id: toolCallId,
@@ -359,6 +373,13 @@ export class VoiceGateway
         toolResponse: { functionResponses },
       });
     }
+  }
+
+  private emitToolResult(
+    client: Socket,
+    payload: VoiceToolResultPayload,
+  ): void {
+    client.emit('voice-tool-result', payload);
   }
 
   private buildSetupMessage(): GeminiLiveClientMessage {
