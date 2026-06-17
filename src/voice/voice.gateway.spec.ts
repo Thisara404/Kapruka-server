@@ -15,6 +15,7 @@ interface MockWebSocketInstance {
   emitOpen(): void;
   emitMessage(message: unknown): void;
   emitError(error: Error): void;
+  emitClose(code?: number, reason?: string): void;
 }
 
 jest.mock('ws', () => ({
@@ -65,6 +66,11 @@ jest.mock('ws', () => ({
 
     emitError(error: Error): void {
       this.emit('error', error);
+    }
+
+    emitClose(code = 1000, reason = ''): void {
+      this.readyState = MockWebSocket.CLOSED;
+      this.emit('close', code, Buffer.from(reason));
     }
 
     private emit(event: string, ...args: unknown[]): void {
@@ -311,36 +317,36 @@ describe('VoiceGateway', () => {
     expect(historyMessage.clientContent).toEqual({
       turnComplete: false,
       turns: [
-      {
-        role: 'user',
-        parts: [{ text: 'Show me categories' }],
-      },
-      {
-        role: 'model',
-        parts: [{ text: 'Here are 11 categories: Cakes, Flowers, Tea.' }],
-      },
-      {
-        role: 'user',
-        parts: [
-          {
-            text: [
-              'User message (singlish): mata tea ona',
-              'English meaning: I want tea',
-            ].join('\n'),
-          },
-        ],
-      },
-      {
-        role: 'model',
-        parts: [
-          {
-            text: [
-              'Assistant response shown to user: Menna tea items dekak.',
-              'English source: Here are two tea items.',
-            ].join('\n'),
-          },
-        ],
-      },
+        {
+          role: 'user',
+          parts: [{ text: 'Show me categories' }],
+        },
+        {
+          role: 'model',
+          parts: [{ text: 'Here are 11 categories: Cakes, Flowers, Tea.' }],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              text: [
+                'User message (singlish): mata tea ona',
+                'English meaning: I want tea',
+              ].join('\n'),
+            },
+          ],
+        },
+        {
+          role: 'model',
+          parts: [
+            {
+              text: [
+                'Assistant response shown to user: Menna tea items dekak.',
+                'English source: Here are two tea items.',
+              ].join('\n'),
+            },
+          ],
+        },
       ],
     });
   });
@@ -436,8 +442,27 @@ describe('VoiceGateway', () => {
     });
   });
 
+  it('emits ERROR with retry timing when Gemini closes after READY', async () => {
+    const client = makeSocket();
+    await gateway.handleConnection(client);
+    const googleSocket = latestWebSocket();
+
+    googleSocket.emitOpen();
+    googleSocket.emitMessage({ setupComplete: {} });
+    googleSocket.emitClose(1000, '');
+
+    expect(client.emit).toHaveBeenCalledWith('voice-status', {
+      status: 'ERROR',
+      error: 'GEMINI_CLOSED_1000',
+      retryAfterSeconds: 30,
+    });
+  });
+
   it('pauses server content forwarding while a tool call is in flight', async () => {
-    let resolveToolCall: (value: { ok: true; result: { products: never[] } }) => void;
+    let resolveToolCall: (value: {
+      ok: true;
+      result: { products: never[] };
+    }) => void;
     chatService.executeVoiceToolCall.mockReturnValue(
       new Promise((resolve) => {
         resolveToolCall = resolve;
