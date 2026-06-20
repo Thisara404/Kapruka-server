@@ -47,6 +47,7 @@ const MAX_HISTORY_TURN_LIMIT = 10;
 
 @WebSocketGateway({
   namespace: '/voice',
+  path: '/voice/socket.io',
   cors: { origin: '*' },
 })
 export class VoiceGateway

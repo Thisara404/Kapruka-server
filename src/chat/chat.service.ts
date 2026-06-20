@@ -38,6 +38,9 @@ import {
   clearCooldowns,
 } from './model-provider.js';
 
+const MAX_CHAT_MESSAGE_LENGTH = 1000;
+const MAX_CHAT_HISTORY_MESSAGES = 200;
+
 const SINGLISH_WORDS = new Set([
   // Greetings & Common Polite Words
   'kohomada',
@@ -1404,9 +1407,9 @@ Text: "${text}"`;
       throw new BadRequestException('Message content cannot be empty');
     }
 
-    if (contentTrimmed.length > 2000) {
+    if (contentTrimmed.length > MAX_CHAT_MESSAGE_LENGTH) {
       throw new BadRequestException(
-        'Message is too long (maximum 2000 characters)',
+        `Message is too long (maximum ${MAX_CHAT_MESSAGE_LENGTH} characters)`,
       );
     }
 
@@ -1428,9 +1431,9 @@ Text: "${text}"`;
       }
     }
 
-    if (messages.length > 200) {
+    if (messages.length > MAX_CHAT_HISTORY_MESSAGES) {
       throw new BadRequestException(
-        'Conversation message limit reached (maximum 200 messages).',
+        `Conversation message limit reached (maximum ${MAX_CHAT_HISTORY_MESSAGES} messages).`,
       );
     }
 
