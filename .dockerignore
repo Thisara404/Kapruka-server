@@ -1,0 +1,15 @@
+node_modules
+dist
+coverage
+.git
+.github
+.agents
+.env
+.env.*
+*.log
+*.tsbuildinfo
+mcp_tools*.txt
+skills-lock.json
+scratch_*.js
+test_translation_direct.js
+test_pagination_api.js
