@@ -420,7 +420,12 @@ function toModelMessages(messages: any[]): any[] {
 
         // Plain text
         if (part.type === 'text') {
-          const t = (part.metadata?.englishText ?? part.text ?? '').trim();
+          const t = (
+            part.metadata?.englishText ??
+            msg.metadata?.englishText ??
+            part.text ??
+            ''
+          ).trim();
           if (t) assistantContent.push({ type: 'text', text: t });
           continue;
         }
@@ -699,34 +704,60 @@ export class ChatService {
     return uiMessages;
   }
 
-  async getHistory(sessionId: string, userId?: string): Promise<any[]> {
-    const session = await this.sessionRepo.findOne({
-      where: { id: sessionId },
-      relations: {
-        turns: {
+  async getHistory(sessionId: string | null, userId?: string): Promise<any[]> {
+    let turns: AgentTurnEntity[] = [];
+
+    if (userId) {
+      if (sessionId) {
+        const session = await this.sessionRepo.findOne({ where: { id: sessionId } });
+        if (session && !session.externalUserId) {
+          this.logger.log(
+            `Migrating anonymous session ${sessionId} to user ${userId}`,
+          );
+          session.externalUserId = userId;
+          await this.sessionRepo.save(session);
+          // Trigger background analytics migration
+          this.analyticsService.migrateSession(sessionId, userId).catch(() => {});
+        }
+      }
+
+      const queryWhere: any = {
+        session: {
+          externalUserId: userId,
+        },
+      };
+      if (sessionId) {
+        queryWhere.sessionId = sessionId;
+      }
+
+      turns = await this.turnRepo.find({
+        where: queryWhere,
+        relations: {
           traces: true,
         },
-      },
-    });
+        order: {
+          createdAt: 'ASC',
+        },
+      });
+    } else if (sessionId) {
+      const session = await this.sessionRepo.findOne({
+        where: { id: sessionId },
+        relations: {
+          turns: {
+            traces: true,
+          },
+        },
+      });
+      if (session) {
+        turns = session.turns.sort(
+          (a, b) => a.createdAt.getTime() - b.createdAt.getTime(),
+        );
+      }
+    }
 
-    if (!session) {
+    if (turns.length === 0) {
       return [];
     }
-
-    if (userId && !session.externalUserId) {
-      this.logger.log(
-        `Migrating anonymous session ${sessionId} to user ${userId}`,
-      );
-      session.externalUserId = userId;
-      await this.sessionRepo.save(session);
-      // Trigger background analytics migration
-      this.analyticsService.migrateSession(sessionId, userId).catch(() => {});
-    }
-
-    // Sort turns by createdAt to reconstruct messages in correct chronological order
-    const turns = session.turns.sort(
-      (a, b) => a.createdAt.getTime() - b.createdAt.getTime(),
-    );
 
     const flatMessages: any[] = [];
     for (const turn of turns) {
@@ -803,6 +834,40 @@ export class ChatService {
     return this.toUIMessages(flatMessages);
   }
 
+  async getSessions(userId: string): Promise<any[]> {
+    const sessions = await this.sessionRepo.find({
+      where: { externalUserId: userId },
+      relations: {
+        turns: true,
+      },
+      order: {
+        updatedAt: 'DESC',
+      },
+    });
+
+    return sessions.map((session) => {
+      const turns = [...session.turns].sort(
+        (a, b) => a.createdAt.getTime() - b.createdAt.getTime(),
+      );
+      const firstRealTurn = turns.find(
+        (t) => t.userPrompt && t.userPrompt !== '[voice session]',
+      );
+      const displayTitle = firstRealTurn?.userPrompt || 'New Conversation';
+
+      return {
+        sessionId: session.id,
+        displayTitle,
+        updatedAt: session.updatedAt,
+      };
+    });
+  }
+
+  async verifySessionOwner(sessionId: string, userId: string): Promise<boolean> {
+    const session = await this.sessionRepo.findOne({ where: { id: sessionId } });
+    if (!session) return true;
+    return session.externalUserId === null || session.externalUserId === userId;
+  }
+
   async findOrCreateSession(
     sessionId: string,
     userId?: string,
@@ -837,7 +902,13 @@ export class ChatService {
       userPrompt,
       metadata,
     });
-    return this.turnRepo.save(turn);
+    const savedTurn = await this.turnRepo.save(turn);
+    try {
+      await this.sessionRepo.update(sessionId, { updatedAt: new Date() });
+    } catch (err) {
+      this.logger.warn(`Failed to update session updatedAt for ${sessionId}: ${err}`);
+    }
+    return savedTurn;
   }
 
   async saveStepTraces(
@@ -1366,20 +1437,50 @@ Text: "${text}"`;
         (h: any) =>
           h.id === msg.id || (h._id && String(h._id) === String(msg._id)),
       );
-      if (dbMsg && dbMsg.metadata) {
-        msg.metadata = dbMsg.metadata;
-      }
-      if (dbMsg && Array.isArray(dbMsg.parts) && Array.isArray(msg.parts)) {
-        for (let i = 0; i < msg.parts.length; i++) {
-          if (dbMsg.parts[i] && dbMsg.parts[i].metadata) {
-            msg.parts[i].metadata = dbMsg.parts[i].metadata;
+      if (dbMsg) {
+        if (dbMsg.metadata) {
+          msg.metadata = dbMsg.metadata;
+        }
+        if (Array.isArray(dbMsg.parts) && Array.isArray(msg.parts)) {
+          for (const part of msg.parts) {
+            if (part && part.toolCallId) {
+              const dbPart = dbMsg.parts.find((dp: any) => dp && dp.toolCallId === part.toolCallId);
+              if (dbPart) {
+                if (dbPart.metadata) part.metadata = dbPart.metadata;
+                if (dbPart.providerOptions) part.providerOptions = dbPart.providerOptions;
+              }
+            } else if (part && part.type === 'text') {
+              const dbPart = dbMsg.parts.find((dp: any) => dp && dp.type === 'text');
+              if (dbPart && dbPart.metadata) {
+                part.metadata = dbPart.metadata;
+              }
+            }
           }
         }
-      }
-      if (dbMsg && Array.isArray(dbMsg.content) && Array.isArray(msg.content)) {
-        for (let i = 0; i < msg.content.length; i++) {
-          if (dbMsg.content[i] && dbMsg.content[i].metadata) {
-            msg.content[i].metadata = dbMsg.content[i].metadata;
+        if (Array.isArray(dbMsg.content) && Array.isArray(msg.content)) {
+          for (const part of msg.content) {
+            if (part && part.toolCallId) {
+              const dbPart = dbMsg.content.find((dp: any) => dp && dp.toolCallId === part.toolCallId);
+              if (dbPart) {
+                if (dbPart.metadata) part.metadata = dbPart.metadata;
+                if (dbPart.providerOptions) part.providerOptions = dbPart.providerOptions;
+              }
+            } else if (part && part.type === 'text') {
+              const dbPart = dbMsg.content.find((dp: any) => dp && dp.type === 'text');
+              if (dbPart && dbPart.metadata) {
+                part.metadata = dbPart.metadata;
+              }
+            }
+          }
+        }
+        if (Array.isArray(dbMsg.toolInvocations) && Array.isArray(msg.toolInvocations)) {
+          for (const inv of msg.toolInvocations) {
+            if (inv && inv.toolCallId) {
+              const dbInv = dbMsg.toolInvocations.find((di: any) => di && di.toolCallId === inv.toolCallId);
+              if (dbInv && dbInv.providerOptions) {
+                inv.providerOptions = dbInv.providerOptions;
+              }
+            }
           }
         }
       }
@@ -2080,7 +2181,7 @@ Text: "${text}"`;
               },
             } as any),
           },
-          stopWhen: stepCountIs(5),
+          stopWhen: stepCountIs(10),
           onFinish: async ({ response, usage }) => {
             if (sessionId) {
               setImmediate(() => {
@@ -2583,5 +2684,13 @@ Text: "${text}"`;
     }
 
     return result;
+  }
+
+  async cancelOrder(orderRef: string): Promise<void> {
+    await this.analyticsService.cancelOrder(orderRef);
+  }
+
+  async restoreOrder(orderRef: string): Promise<void> {
+    await this.analyticsService.restoreOrder(orderRef);
   }
 }

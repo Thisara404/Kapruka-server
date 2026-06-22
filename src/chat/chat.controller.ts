@@ -71,11 +71,31 @@ export class ChatController {
   }
 
   @Get('history')
-  @UseGuards(OptionalJwtAuthGuard)
-  async history(@Query('sessionId') sessionId: string, @Req() req: any) {
+  @UseGuards(JwtAuthGuard)
+  async history(@Query('sessionId') sessionId: string | undefined, @Req() req: any) {
     const userId = req.user?.id;
-    const messages = await this.chatService.getHistory(sessionId, userId);
+    if (!userId) {
+      throw new BadRequestException('User ID not found in token');
+    }
+    if (sessionId) {
+      const isOwner = await this.chatService.verifySessionOwner(sessionId, userId);
+      if (!isOwner) {
+        throw new HttpException('Forbidden session access', HttpStatus.FORBIDDEN);
+      }
+    }
+    const messages = await this.chatService.getHistory(sessionId || null, userId);
     return { messages };
+  }
+
+  @Get('sessions')
+  @UseGuards(JwtAuthGuard)
+  async getSessions(@Req() req: any) {
+    const userId = req.user?.id;
+    if (!userId) {
+      throw new BadRequestException('User ID not found in token');
+    }
+    const sessions = await this.chatService.getSessions(userId);
+    return { sessions };
   }
 
   @Get('cities')
@@ -83,6 +103,26 @@ export class ChatController {
     const limitNum = limit ? Math.min(parseInt(limit, 10) || 20, 50) : 20;
     const results = await this.chatService.listDeliveryCities(query, limitNum);
     return results;
+  }
+
+  @Post('cancel-order')
+  @UseGuards(OptionalJwtAuthGuard)
+  async cancelOrder(@Body() body: { orderRef: string }) {
+    if (!body.orderRef) {
+      throw new BadRequestException('orderRef is required');
+    }
+    await this.chatService.cancelOrder(body.orderRef);
+    return { success: true };
+  }
+
+  @Post('restore-order')
+  @UseGuards(OptionalJwtAuthGuard)
+  async restoreOrder(@Body() body: { orderRef: string }) {
+    if (!body.orderRef) {
+      throw new BadRequestException('orderRef is required');
+    }
+    await this.chatService.restoreOrder(body.orderRef);
+    return { success: true };
   }
 
   @Post('quick-order')

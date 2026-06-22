@@ -60,6 +60,36 @@ export class AnalyticsService {
     }
   }
 
+  async cancelOrder(orderRef: string): Promise<void> {
+    try {
+      const order = await this.orderRepo.findOne({ where: { orderRef } });
+      if (order) {
+        order.status = 'cancelled';
+        await this.orderRepo.save(order);
+        this.logger.log(`Order ${orderRef} status updated to cancelled`);
+      } else {
+        this.logger.warn(`Order ${orderRef} not found for cancellation`);
+      }
+    } catch (err: any) {
+      this.logger.error(`Failed to cancel order ${orderRef}: ${err.message}`);
+    }
+  }
+
+  async restoreOrder(orderRef: string): Promise<void> {
+    try {
+      const order = await this.orderRepo.findOne({ where: { orderRef } });
+      if (order) {
+        order.status = 'created';
+        await this.orderRepo.save(order);
+        this.logger.log(`Order ${orderRef} status restored to created`);
+      } else {
+        this.logger.warn(`Order ${orderRef} not found for restoration`);
+      }
+    } catch (err: any) {
+      this.logger.error(`Failed to restore order ${orderRef}: ${err.message}`);
+    }
+  }
+
   async logEvent(data: {
     sessionId: string;
     userId?: string;
