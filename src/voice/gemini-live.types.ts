@@ -32,7 +32,6 @@ export interface GeminiLiveSetupMessage {
     model: string;
     generationConfig: {
       responseModalities: GeminiLiveResponseModality[];
-      candidateCount?: number;
     };
     systemInstruction: {
       parts: Array<{ text: string }>;
@@ -52,10 +51,11 @@ export interface GeminiLiveClientContentMessage {
 
 export interface GeminiLiveRealtimeInputMessage {
   realtimeInput: {
-    audio: {
+    audio?: {
       data: string;
       mimeType: string;
     };
+    text?: string;
   };
 }
 

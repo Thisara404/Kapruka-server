@@ -34,6 +34,7 @@ import type {
 import type {
   ActiveVoiceSession,
   VoiceAuthPayload,
+  VoiceAutomationRedirectPayload,
   VoiceStatusPayload,
   VoiceToolResultPayload,
   VoiceTranscriptPayload,
@@ -44,6 +45,7 @@ const UUID_RE =
 const DEFAULT_HISTORY_TURN_LIMIT = 8;
 const MIN_HISTORY_TURN_LIMIT = 6;
 const MAX_HISTORY_TURN_LIMIT = 10;
+const VENDOR_SOCKET_TERMINATE_GRACE_MS = 1500;
 
 @WebSocketGateway({
   namespace: '/voice',
@@ -76,7 +78,7 @@ export class VoiceGateway
     }
 
     if (this.reservedSessions >= this.getMaxSessions()) {
-      this.rejectForLimit(client);
+      this.rejectForLocalCapacity(client);
       return;
     }
 
@@ -158,8 +160,11 @@ export class VoiceGateway
     if (state.googleSocket.readyState !== WebSocket.OPEN) {
       this.emitStatus(client, {
         status: 'ERROR',
-        error: 'GEMINI_SOCKET_CLOSED',
+        error: this.formatGeminiClosedError(state),
+        retryAfterSeconds: 30,
       });
+      this.releaseSession(client.id, false);
+      this.disconnectClient(client);
       return;
     }
 
@@ -189,7 +194,7 @@ export class VoiceGateway
 
   private bindGeminiSocket(client: Socket, state: ActiveVoiceSession): void {
     state.googleSocket.on('open', () => {
-      this.sendGemini(state, this.buildSetupMessage());
+      this.sendGemini(state, this.buildSetupMessage(state.history));
     });
 
     state.googleSocket.on('message', (data) => {
@@ -199,7 +204,7 @@ export class VoiceGateway
     state.googleSocket.on('error', (error) => {
       const message = this.errorMessage(error);
       if (this.isLimitError(message)) {
-        this.rejectForLimit(client);
+        this.rejectForGeminiQuota(client);
       } else {
         this.logger.warn(`Gemini live socket error: ${message}`);
         this.emitStatus(client, { status: 'ERROR', error: 'GEMINI_ERROR' });
@@ -210,17 +215,15 @@ export class VoiceGateway
 
     state.googleSocket.on('close', (code, reason) => {
       const reasonText = reason.toString('utf8');
+      state.geminiCloseCode = code;
+      state.geminiCloseReason = reasonText;
       if (this.isLimitError(reasonText)) {
-        this.rejectForLimit(client);
+        this.rejectForGeminiQuota(client);
       } else if (this.sessions.has(client.id)) {
-        this.logger.warn(
-          `Gemini live socket closed ${state.isReady ? 'after READY' : 'before setupComplete'}: code=${code}, reason=${reasonText || 'empty'}`,
-        );
+        this.logger.warn(this.formatGeminiCloseLog(state));
         this.emitStatus(client, {
           status: 'ERROR',
-          error: reasonText
-            ? `GEMINI_CLOSED: ${reasonText}`
-            : `GEMINI_CLOSED_${code}`,
+          error: this.formatGeminiClosedError(state),
           retryAfterSeconds: 30,
         });
       }
@@ -236,7 +239,7 @@ export class VoiceGateway
   ): Promise<void> {
     const rawText = this.rawDataToText(data);
     if (this.isLimitError(rawText)) {
-      this.rejectForLimit(client);
+      this.rejectForGeminiQuota(client);
       this.releaseSession(client.id, true);
       return;
     }
@@ -258,7 +261,7 @@ export class VoiceGateway
         .filter(Boolean)
         .join(' ');
       if (this.isLimitError(errorText)) {
-        this.rejectForLimit(client);
+        this.rejectForGeminiQuota(client);
       } else {
         this.emitStatus(client, { status: 'ERROR', error: 'GEMINI_ERROR' });
       }
@@ -268,7 +271,6 @@ export class VoiceGateway
     }
 
     if (message.setupComplete) {
-      this.hydrateGeminiHistory(state);
       state.isReady = true;
       this.emitStatus(client, { status: 'READY' });
     }
@@ -360,6 +362,26 @@ export class VoiceGateway
         error: result.error,
       });
 
+      // Programmatic order redirect: if kapruka_create_order succeeds with a
+      // checkout URL, immediately emit the redirect event and tear down the
+      // voice session — the AI should not narrate routing decisions.
+      if (
+        result.ok &&
+        toolName === 'kapruka_create_order'
+      ) {
+        const checkoutUrl = this.extractCheckoutUrl(result.result);
+        if (checkoutUrl) {
+          this.emitAutomationRedirect(client, { url: checkoutUrl });
+          // Allow the tool-result event to flush before closing the session.
+          setImmediate(() => {
+            this.releaseSession(client.id, true);
+            this.disconnectClient(client);
+          });
+          // Skip sending the tool response back to Gemini — session is ending.
+          return;
+        }
+      }
+
       functionResponses.push({
         name: toolName,
         id: toolCallId,
@@ -383,18 +405,57 @@ export class VoiceGateway
     client.emit('voice-tool-result', payload);
   }
 
-  private buildSetupMessage(): GeminiLiveClientMessage {
+  private emitAutomationRedirect(
+    client: Socket,
+    payload: VoiceAutomationRedirectPayload,
+  ): void {
+    client.emit('voice-automation-redirect', payload);
+    this.logger.log(
+      `Emitted voice-automation-redirect to ${client.id}: ${payload.url}`,
+    );
+  }
+
+  /**
+   * Safely extract checkout_url / checkoutUrl from a kapruka_create_order
+   * tool result, regardless of the nesting shape returned by the MCP tool.
+   */
+  private extractCheckoutUrl(result: unknown): string | undefined {
+    if (!this.isRecord(result)) return undefined;
+
+    const directUrl =
+      this.stringValue(result['checkout_url']) ??
+      this.stringValue(result['checkoutUrl']);
+    if (directUrl) return directUrl;
+
+    // Some MCP tools wrap results in a { value: { ... } } envelope
+    if (this.isRecord(result['value'])) {
+      return (
+        this.stringValue((result['value'] as Record<string, unknown>)['checkout_url']) ??
+        this.stringValue((result['value'] as Record<string, unknown>)['checkoutUrl'])
+      );
+    }
+
+    return undefined;
+  }
+
+  private buildSetupMessage(
+    history: GeminiLiveContent[] = [],
+  ): GeminiLiveClientMessage {
+    const historyContext = this.formatHistoryContext(history);
+    const systemText = historyContext
+      ? `${THISARI_VOICE_SYSTEM_INSTRUCTION}\n\nRecent conversation context:\n${historyContext}`
+      : THISARI_VOICE_SYSTEM_INSTRUCTION;
+
     return {
       setup: {
         model: this.getModelPath(),
         generationConfig: {
           responseModalities: ['AUDIO'],
-          candidateCount: 1,
         },
         systemInstruction: {
           parts: [
             {
-              text: THISARI_VOICE_SYSTEM_INSTRUCTION,
+              text: systemText,
             },
           ],
         },
@@ -405,19 +466,6 @@ export class VoiceGateway
         ],
       },
     };
-  }
-
-  private hydrateGeminiHistory(state: ActiveVoiceSession): void {
-    if (state.history.length === 0) {
-      return;
-    }
-
-    this.sendGemini(state, {
-      clientContent: {
-        turns: state.history,
-        turnComplete: false,
-      },
-    });
   }
 
   private async loadGeminiHistory(
@@ -454,6 +502,21 @@ export class VoiceGateway
     }
 
     return history;
+  }
+
+  private formatHistoryContext(history: GeminiLiveContent[]): string {
+    return history
+      .map((turn) => {
+        const text = turn.parts
+          .map((part) => part.text.trim())
+          .filter(Boolean)
+          .join('\n');
+
+        if (!text) return undefined;
+        return `${turn.role === 'model' ? 'Assistant' : 'User'}: ${text}`;
+      })
+      .filter(Boolean)
+      .join('\n');
   }
 
   private formatUserHistoryText(turn: AgentTurnEntity): string | undefined {
@@ -502,6 +565,9 @@ export class VoiceGateway
       return;
     }
 
+    state.lastClientMessageKind = this.clientMessageKind(message);
+    state.lastClientMessageAt = Date.now();
+
     state.googleSocket.send(JSON.stringify(message), (error) => {
       if (error) {
         this.logger.warn(
@@ -509,6 +575,38 @@ export class VoiceGateway
         );
       }
     });
+  }
+
+  private clientMessageKind(message: GeminiLiveClientMessage): string {
+    if ('setup' in message) return 'setup';
+    if ('clientContent' in message) return 'clientContent';
+    if ('toolResponse' in message) return 'toolResponse';
+    if ('realtimeInput' in message) {
+      if (message.realtimeInput.audio) return 'audio';
+      if (message.realtimeInput.text) return 'text';
+      return 'realtimeInput';
+    }
+    return 'unknown';
+  }
+
+  private formatGeminiCloseLog(state: ActiveVoiceSession): string {
+    return `Gemini live socket closed ${
+      state.isReady ? 'after READY' : 'before setupComplete'
+    }: code=${state.geminiCloseCode ?? 'unknown'}, reason=${
+      state.geminiCloseReason || 'empty'
+    }, lastClientMessage=${state.lastClientMessageKind ?? 'unknown'}`;
+  }
+
+  private formatGeminiClosedError(state: ActiveVoiceSession): string {
+    const code = state.geminiCloseCode;
+    const reason = state.geminiCloseReason;
+    const lastClientMessage = state.lastClientMessageKind ?? 'unknown';
+
+    if (reason) {
+      return `GEMINI_CLOSED: ${reason} (code=${code ?? 'unknown'}, lastClientMessage=${lastClientMessage})`;
+    }
+
+    return `GEMINI_SOCKET_CLOSED: code=${code ?? 'unknown'}, lastClientMessage=${lastClientMessage}`;
   }
 
   private releaseSession(socketId: string, closeVendor: boolean): void {
@@ -524,14 +622,33 @@ export class VoiceGateway
       state.googleSocket.readyState !== WebSocket.CLOSING &&
       state.googleSocket.readyState !== WebSocket.CLOSED
     ) {
-      state.googleSocket.close();
+      this.closeVendorSocket(state);
     }
   }
 
-  private rejectForLimit(client: Socket): void {
+  private closeVendorSocket(state: ActiveVoiceSession): void {
+    state.googleSocket.close();
+
+    setTimeout(() => {
+      if (state.googleSocket.readyState !== WebSocket.CLOSED) {
+        state.googleSocket.terminate();
+      }
+    }, VENDOR_SOCKET_TERMINATE_GRACE_MS).unref?.();
+  }
+
+  private rejectForLocalCapacity(client: Socket): void {
     this.emitStatus(client, {
-      status: 'LIMIT_EXHAUSTED',
-      error: 'ALL_CHANNELS_BUSY',
+      status: 'CAPACITY_EXHAUSTED',
+      error: 'LOCAL_SESSION_LIMIT',
+      retryAfterSeconds: 15,
+    });
+    this.disconnectClient(client);
+  }
+
+  private rejectForGeminiQuota(client: Socket): void {
+    this.emitStatus(client, {
+      status: 'QUOTA_EXHAUSTED',
+      error: 'GEMINI_QUOTA_EXHAUSTED',
       retryAfterSeconds: 30,
     });
     this.disconnectClient(client);
@@ -602,10 +719,7 @@ export class VoiceGateway
   }
 
   private getModel(): string {
-    return (
-      this.configService.get<string>('GEMINI_LIVE_MODEL') ??
-      DEFAULT_GEMINI_LIVE_MODEL
-    );
+    return DEFAULT_GEMINI_LIVE_MODEL;
   }
 
   private getModelPath(): string {

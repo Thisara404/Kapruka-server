@@ -16,6 +16,8 @@ interface MockWebSocketInstance {
   emitMessage(message: unknown): void;
   emitError(error: Error): void;
   emitClose(code?: number, reason?: string): void;
+  close(): void;
+  terminate(): void;
 }
 
 jest.mock('ws', () => ({
@@ -51,6 +53,11 @@ jest.mock('ws', () => ({
       if (this.readyState === MockWebSocket.CLOSED) return;
       this.readyState = MockWebSocket.CLOSED;
       this.emit('close', 1000, Buffer.from(''));
+    }
+
+    terminate(): void {
+      this.readyState = MockWebSocket.CLOSED;
+      this.emit('close', 1006, Buffer.from('terminated'));
     }
 
     emitOpen(): void {
@@ -181,7 +188,7 @@ describe('VoiceGateway', () => {
     expect(webSocketInstances()).toHaveLength(0);
   });
 
-  it('rejects the fourth local session with LIMIT_EXHAUSTED', async () => {
+  it('rejects the fourth local session with CAPACITY_EXHAUSTED', async () => {
     for (let index = 0; index < 3; index += 1) {
       await gateway.handleConnection(makeSocket());
     }
@@ -191,15 +198,15 @@ describe('VoiceGateway', () => {
     await flush();
 
     expect(fourthClient.emit).toHaveBeenCalledWith('voice-status', {
-      status: 'LIMIT_EXHAUSTED',
-      error: 'ALL_CHANNELS_BUSY',
-      retryAfterSeconds: 30,
+      status: 'CAPACITY_EXHAUSTED',
+      error: 'LOCAL_SESSION_LIMIT',
+      retryAfterSeconds: 15,
     });
     expect(fourthClient.disconnect).toHaveBeenCalledWith(true);
     expect(webSocketInstances()).toHaveLength(3);
   });
 
-  it('maps a Gemini 429 error to LIMIT_EXHAUSTED', async () => {
+  it('maps a Gemini 429 error to QUOTA_EXHAUSTED', async () => {
     const client = makeSocket();
     await gateway.handleConnection(client);
 
@@ -207,8 +214,8 @@ describe('VoiceGateway', () => {
     await flush();
 
     expect(client.emit).toHaveBeenCalledWith('voice-status', {
-      status: 'LIMIT_EXHAUSTED',
-      error: 'ALL_CHANNELS_BUSY',
+      status: 'QUOTA_EXHAUSTED',
+      error: 'GEMINI_QUOTA_EXHAUSTED',
       retryAfterSeconds: 30,
     });
     expect(client.disconnect).toHaveBeenCalledWith(true);
@@ -279,7 +286,6 @@ describe('VoiceGateway', () => {
     const googleSocket = latestWebSocket();
     googleSocket.emitOpen();
     const setupMessage = JSON.parse(googleSocket.sent[0]);
-    expect(setupMessage.setup.history).toBeUndefined();
     googleSocket.emitMessage({ setupComplete: {} });
 
     expect(turnRepo.find).toHaveBeenCalledWith({
@@ -300,10 +306,19 @@ describe('VoiceGateway', () => {
     );
     expect(setupMessage.setup.generationConfig).toEqual({
       responseModalities: ['AUDIO'],
-      candidateCount: 1,
     });
+    expect(setupMessage.setup.responseModalities).toBeUndefined();
     expect(setupMessage.setup.systemInstruction.parts[0].text).toContain(
       'strictly forbidden from writing or reciting lists of specific products',
+    );
+    expect(setupMessage.setup.systemInstruction.parts[0].text).toContain(
+      'Recent conversation context:',
+    );
+    expect(setupMessage.setup.systemInstruction.parts[0].text).toContain(
+      'User: Show me categories',
+    );
+    expect(setupMessage.setup.systemInstruction.parts[0].text).toContain(
+      'Assistant: Here are 11 categories: Cakes, Flowers, Tea.',
     );
     expect(setupMessage.setup.tools[0].functionDeclarations).toEqual(
       expect.arrayContaining([
@@ -313,49 +328,15 @@ describe('VoiceGateway', () => {
       ]),
     );
 
-    const historyMessage = JSON.parse(googleSocket.sent[1]);
-    expect(historyMessage.clientContent).toEqual({
-      turnComplete: false,
-      turns: [
-        {
-          role: 'user',
-          parts: [{ text: 'Show me categories' }],
-        },
-        {
-          role: 'model',
-          parts: [{ text: 'Here are 11 categories: Cakes, Flowers, Tea.' }],
-        },
-        {
-          role: 'user',
-          parts: [
-            {
-              text: [
-                'User message (singlish): mata tea ona',
-                'English meaning: I want tea',
-              ].join('\n'),
-            },
-          ],
-        },
-        {
-          role: 'model',
-          parts: [
-            {
-              text: [
-                'Assistant response shown to user: Menna tea items dekak.',
-                'English source: Here are two tea items.',
-              ].join('\n'),
-            },
-          ],
-        },
-      ],
-    });
+    expect(googleSocket.sent).toHaveLength(1);
   });
 
-  it('does not duplicate a models/ prefix from GEMINI_LIVE_MODEL', async () => {
+  it('enforces the fixed Gemini live model even when env overrides it', async () => {
     configService.get.mockImplementation((key: string) => {
       const values: Record<string, string> = {
         GEMINI_LIVE_API_KEY: 'test-key',
-        GEMINI_LIVE_MODEL: 'models/gemini-3.1-flash-live-preview',
+        GEMINI_LIVE_MODEL:
+          'models/gemini-2.5-flash-native-audio-preview-12-2025',
         GEMINI_LIVE_MAX_SESSIONS: '3',
       };
       return values[key];
@@ -460,9 +441,29 @@ describe('VoiceGateway', () => {
 
     expect(client.emit).toHaveBeenCalledWith('voice-status', {
       status: 'ERROR',
-      error: 'GEMINI_CLOSED_1000',
+      error: 'GEMINI_SOCKET_CLOSED: code=1000, lastClientMessage=setup',
       retryAfterSeconds: 30,
     });
+  });
+
+  it('terminates a vendor socket when graceful close stalls', async () => {
+    jest.useFakeTimers();
+    const client = makeSocket();
+    await gateway.handleConnection(client);
+    const googleSocket = latestWebSocket();
+    const closeSpy = jest
+      .spyOn(googleSocket, 'close')
+      .mockImplementation(() => {
+        googleSocket.readyState = WebSocket.CLOSING;
+      });
+    const terminateSpy = jest.spyOn(googleSocket, 'terminate');
+
+    gateway.onModuleDestroy();
+    jest.advanceTimersByTime(1500);
+
+    expect(closeSpy).toHaveBeenCalled();
+    expect(terminateSpy).toHaveBeenCalled();
+    jest.useRealTimers();
   });
 
   it('pauses server content forwarding while a tool call is in flight', async () => {

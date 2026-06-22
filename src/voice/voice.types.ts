@@ -5,15 +5,21 @@ export type VoiceStatus =
   | 'CONNECTING'
   | 'READY'
   | 'ERROR'
-  | 'LIMIT_EXHAUSTED'
+  | 'CAPACITY_EXHAUSTED'
+  | 'QUOTA_EXHAUSTED'
   | 'CLOSED';
 
 export type VoiceStatusPayload =
   | { status: 'CONNECTING' | 'READY' | 'CLOSED' }
   | { status: 'ERROR'; error: string; retryAfterSeconds?: number }
   | {
-      status: 'LIMIT_EXHAUSTED';
-      error: 'ALL_CHANNELS_BUSY';
+      status: 'CAPACITY_EXHAUSTED';
+      error: 'LOCAL_SESSION_LIMIT';
+      retryAfterSeconds?: number;
+    }
+  | {
+      status: 'QUOTA_EXHAUSTED';
+      error: 'GEMINI_QUOTA_EXHAUSTED';
       retryAfterSeconds?: number;
     };
 
@@ -46,6 +52,10 @@ export interface ActiveVoiceSession {
   isToolCallInFlight: boolean;
   isReleased: boolean;
   createdAt: number;
+  lastClientMessageKind?: string;
+  lastClientMessageAt?: number;
+  geminiCloseCode?: number;
+  geminiCloseReason?: string;
 }
 
 export interface VoiceToolCallInput {
@@ -61,3 +71,8 @@ export interface VoiceToolCallResult {
   result?: unknown;
   error?: string;
 }
+
+export interface VoiceAutomationRedirectPayload {
+  url: string;
+}
+

@@ -275,9 +275,12 @@ function trimSearchResult(result: any): any {
       })),
     };
 
-    if (result.totalResults !== undefined) trimmed.totalResults = result.totalResults;
-    if (result.currentPage !== undefined) trimmed.currentPage = result.currentPage;
-    if (result.hasNextPage !== undefined) trimmed.hasNextPage = result.hasNextPage;
+    if (result.totalResults !== undefined)
+      trimmed.totalResults = result.totalResults;
+    if (result.currentPage !== undefined)
+      trimmed.currentPage = result.currentPage;
+    if (result.hasNextPage !== undefined)
+      trimmed.hasNextPage = result.hasNextPage;
 
     return trimmed;
   }
@@ -1601,27 +1604,33 @@ Text: "${text}"`;
                   `[Tool] kapruka_search_products raw args: ${JSON.stringify(args)}`,
                 );
 
+                const toolArgs =
+                  args?.params && typeof args.params === 'object'
+                    ? { ...args.params, ...args }
+                    : args;
+
                 // Try known parameter names first
-                let q = (args.q ||
-                  args.keywords ||
-                  args.query ||
-                  args.keyword ||
-                  args.search ||
-                  args.search_query ||
-                  args.term ||
-                  args.text ||
+                let q = (toolArgs.q ||
+                  toolArgs.keywords ||
+                  toolArgs.query ||
+                  toolArgs.keyword ||
+                  toolArgs.search ||
+                  toolArgs.search_query ||
+                  toolArgs.term ||
+                  toolArgs.text ||
                   '') as string;
 
                 // Fallback: if q is still empty, scan all string values in args for a usable query
                 if (!q.trim()) {
-                  for (const [key, val] of Object.entries(args)) {
+                  for (const [key, val] of Object.entries(toolArgs)) {
                     if (
                       typeof val === 'string' &&
                       val.trim().length >= 3 &&
                       key !== 'category' &&
                       key !== 'sort' &&
                       key !== 'cursor' &&
-                      key !== 'response_format'
+                      key !== 'response_format' &&
+                      key !== 'toolCallId'
                     ) {
                       this.logger.log(
                         `[Tool] Using fallback param "${key}" = "${val}" as search query`,
@@ -1649,33 +1658,35 @@ Text: "${text}"`;
                   q: q.trim(),
                   response_format: 'json',
                 };
-                if (args.category) params.category = args.category;
-                if (args.limit) params.limit = args.limit;
-                if (args.min_price !== undefined)
-                  params.min_price = args.min_price;
-                if (args.max_price !== undefined)
-                  params.max_price = args.max_price;
-                if (args.in_stock_only !== undefined)
-                  params.in_stock_only = args.in_stock_only;
-                if (args.sort) params.sort = args.sort;
+                if (toolArgs.category) params.category = toolArgs.category;
+                if (toolArgs.limit) params.limit = toolArgs.limit;
+                if (toolArgs.min_price !== undefined)
+                  params.min_price = toolArgs.min_price;
+                if (toolArgs.max_price !== undefined)
+                  params.max_price = toolArgs.max_price;
+                if (toolArgs.in_stock_only !== undefined)
+                  params.in_stock_only = toolArgs.in_stock_only;
+                if (toolArgs.sort) params.sort = toolArgs.sort;
 
                 // ── Auto-pagination: inject cursor for repeated queries ──
                 // If the model searched for the same query before and didn't
                 // pass a cursor, auto-inject the last cursor to get next page
-                if (args.cursor) {
-                  params.cursor = args.cursor;
-                } else if (args.page !== undefined && args.page > 1) {
-                  const limit = args.limit || 10;
-                  const offset = limit * (args.page - 1);
-                  const offsetBase64 = Buffer.from(String(offset)).toString('base64');
+                if (toolArgs.cursor) {
+                  params.cursor = toolArgs.cursor;
+                } else if (toolArgs.page !== undefined && toolArgs.page > 1) {
+                  const limit = toolArgs.limit || 10;
+                  const offset = limit * (toolArgs.page - 1);
+                  const offsetBase64 = Buffer.from(String(offset)).toString(
+                    'base64',
+                  );
                   const generatedCursor = Buffer.from(
                     JSON.stringify({
                       u: offsetBase64,
-                      p: args.page,
+                      p: toolArgs.page,
                     }),
                   ).toString('base64');
                   this.logger.log(
-                    `[Tool] Generating cursor for page ${args.page}: ${generatedCursor}`,
+                    `[Tool] Generating cursor for page ${toolArgs.page}: ${generatedCursor}`,
                   );
                   params.cursor = generatedCursor;
                 } else {
@@ -1691,7 +1702,7 @@ Text: "${text}"`;
                 }
 
                 this.logger.log(
-                  `[Tool] kapruka_search_products: q="${q.trim()}", category=${args.category || 'none'}, cursor=${params.cursor || 'none'}`,
+                  `[Tool] kapruka_search_products: q="${q.trim()}", category=${toolArgs.category || 'none'}, cursor=${params.cursor || 'none'}`,
                 );
                 const result = await callMcpTool('kapruka_search_products', {
                   params,
@@ -1705,7 +1716,11 @@ Text: "${text}"`;
                 const enrichedResult = {
                   ...result,
                   currentPage,
-                  totalResults: result?.results?.length ? (result.results.length < limit && currentPage === 1 ? result.results.length : undefined) : 0,
+                  totalResults: result?.results?.length
+                    ? result.results.length < limit && currentPage === 1
+                      ? result.results.length
+                      : undefined
+                    : 0,
                   hasNextPage: !!result?.next_cursor,
                 };
 
@@ -1788,7 +1803,16 @@ Text: "${text}"`;
                     .catch(() => {});
                 }
 
-                return result;
+                return result
+                  ? {
+                      ...result,
+                      cart: args.cart,
+                      recipient: args.recipient,
+                      delivery: args.delivery,
+                      sender: args.sender,
+                      gift_message: args.gift_message,
+                    }
+                  : result;
               },
             } as any),
 
