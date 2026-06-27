@@ -75,4 +75,3 @@ export interface VoiceToolCallResult {
 export interface VoiceAutomationRedirectPayload {
   url: string;
 }
-

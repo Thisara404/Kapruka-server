@@ -365,10 +365,7 @@ export class VoiceGateway
       // Programmatic order redirect: if kapruka_create_order succeeds with a
       // checkout URL, immediately emit the redirect event and tear down the
       // voice session — the AI should not narrate routing decisions.
-      if (
-        result.ok &&
-        toolName === 'kapruka_create_order'
-      ) {
+      if (result.ok && toolName === 'kapruka_create_order') {
         const checkoutUrl = this.extractCheckoutUrl(result.result);
         if (checkoutUrl) {
           this.emitAutomationRedirect(client, { url: checkoutUrl });
@@ -430,8 +427,8 @@ export class VoiceGateway
     // Some MCP tools wrap results in a { value: { ... } } envelope
     if (this.isRecord(result['value'])) {
       return (
-        this.stringValue((result['value'] as Record<string, unknown>)['checkout_url']) ??
-        this.stringValue((result['value'] as Record<string, unknown>)['checkoutUrl'])
+        this.stringValue(result['value']['checkout_url']) ??
+        this.stringValue(result['value']['checkoutUrl'])
       );
     }
 

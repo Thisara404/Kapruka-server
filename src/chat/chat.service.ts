@@ -18,6 +18,7 @@ import { StepType } from '../database/enums/step-type.enum.js';
 import { SessionStatus } from '../database/enums/session-status.enum.js';
 import { AnalyticsService } from '../analytics/analytics.service.js';
 import { callMcpTool } from './mcp-client.js';
+import { filterResponseStream } from './stream-filter.util.js';
 import { getSystemPrompt } from './system-prompt.js';
 import { checkRateLimit } from './rate-limiter.js';
 import {
@@ -709,7 +710,9 @@ export class ChatService {
 
     if (userId) {
       if (sessionId) {
-        const session = await this.sessionRepo.findOne({ where: { id: sessionId } });
+        const session = await this.sessionRepo.findOne({
+          where: { id: sessionId },
+        });
         if (session && !session.externalUserId) {
           this.logger.log(
             `Migrating anonymous session ${sessionId} to user ${userId}`,
@@ -717,7 +720,9 @@ export class ChatService {
           session.externalUserId = userId;
           await this.sessionRepo.save(session);
           // Trigger background analytics migration
-          this.analyticsService.migrateSession(sessionId, userId).catch(() => {});
+          this.analyticsService
+            .migrateSession(sessionId, userId)
+            .catch(() => {});
         }
       }
 
@@ -862,8 +867,13 @@ export class ChatService {
     });
   }
 
-  async verifySessionOwner(sessionId: string, userId: string): Promise<boolean> {
-    const session = await this.sessionRepo.findOne({ where: { id: sessionId } });
+  async verifySessionOwner(
+    sessionId: string,
+    userId: string,
+  ): Promise<boolean> {
+    const session = await this.sessionRepo.findOne({
+      where: { id: sessionId },
+    });
     if (!session) return true;
     return session.externalUserId === null || session.externalUserId === userId;
   }
@@ -906,7 +916,9 @@ export class ChatService {
     try {
       await this.sessionRepo.update(sessionId, { updatedAt: new Date() });
     } catch (err) {
-      this.logger.warn(`Failed to update session updatedAt for ${sessionId}: ${err}`);
+      this.logger.warn(
+        `Failed to update session updatedAt for ${sessionId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
     return savedTurn;
   }
@@ -1444,13 +1456,18 @@ Text: "${text}"`;
         if (Array.isArray(dbMsg.parts) && Array.isArray(msg.parts)) {
           for (const part of msg.parts) {
             if (part && part.toolCallId) {
-              const dbPart = dbMsg.parts.find((dp: any) => dp && dp.toolCallId === part.toolCallId);
+              const dbPart = dbMsg.parts.find(
+                (dp: any) => dp && dp.toolCallId === part.toolCallId,
+              );
               if (dbPart) {
                 if (dbPart.metadata) part.metadata = dbPart.metadata;
-                if (dbPart.providerOptions) part.providerOptions = dbPart.providerOptions;
+                if (dbPart.providerOptions)
+                  part.providerOptions = dbPart.providerOptions;
               }
             } else if (part && part.type === 'text') {
-              const dbPart = dbMsg.parts.find((dp: any) => dp && dp.type === 'text');
+              const dbPart = dbMsg.parts.find(
+                (dp: any) => dp && dp.type === 'text',
+              );
               if (dbPart && dbPart.metadata) {
                 part.metadata = dbPart.metadata;
               }
@@ -1460,23 +1477,33 @@ Text: "${text}"`;
         if (Array.isArray(dbMsg.content) && Array.isArray(msg.content)) {
           for (const part of msg.content) {
             if (part && part.toolCallId) {
-              const dbPart = dbMsg.content.find((dp: any) => dp && dp.toolCallId === part.toolCallId);
+              const dbPart = dbMsg.content.find(
+                (dp: any) => dp && dp.toolCallId === part.toolCallId,
+              );
               if (dbPart) {
                 if (dbPart.metadata) part.metadata = dbPart.metadata;
-                if (dbPart.providerOptions) part.providerOptions = dbPart.providerOptions;
+                if (dbPart.providerOptions)
+                  part.providerOptions = dbPart.providerOptions;
               }
             } else if (part && part.type === 'text') {
-              const dbPart = dbMsg.content.find((dp: any) => dp && dp.type === 'text');
+              const dbPart = dbMsg.content.find(
+                (dp: any) => dp && dp.type === 'text',
+              );
               if (dbPart && dbPart.metadata) {
                 part.metadata = dbPart.metadata;
               }
             }
           }
         }
-        if (Array.isArray(dbMsg.toolInvocations) && Array.isArray(msg.toolInvocations)) {
+        if (
+          Array.isArray(dbMsg.toolInvocations) &&
+          Array.isArray(msg.toolInvocations)
+        ) {
           for (const inv of msg.toolInvocations) {
             if (inv && inv.toolCallId) {
-              const dbInv = dbMsg.toolInvocations.find((di: any) => di && di.toolCallId === inv.toolCallId);
+              const dbInv = dbMsg.toolInvocations.find(
+                (di: any) => di && di.toolCallId === inv.toolCallId,
+              );
               if (dbInv && dbInv.providerOptions) {
                 inv.providerOptions = dbInv.providerOptions;
               }
@@ -2444,9 +2471,13 @@ Text: "${text}"`;
             },
           });
 
+          // Strip providerMetadata, thoughtSignature, toolCallId and blocked
+          // event types before the stream reaches the public client.
+          const filteredStream = filterResponseStream(rawStream);
+
           // Apply translation and identity sanitization to the stream
           const processedStream = this.processResponseStream(
-            rawStream,
+            filteredStream,
             targetLang,
             modelName,
           );

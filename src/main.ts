@@ -32,9 +32,7 @@ function resolvePublicApiUrl(port: number): string {
     process.env.PUBLIC_API_URL ||
     process.env.BACKEND_PUBLIC_URL ||
     process.env.RENDER_EXTERNAL_URL;
-  const baseUrl =
-    configuredPublicUrl ||
-    `http://localhost:${port}`;
+  const baseUrl = configuredPublicUrl || `http://localhost:${port}`;
   const normalizedBaseUrl = baseUrl.replace(/\/+$/, '');
 
   return normalizedBaseUrl.endsWith(`/${API_PREFIX}`)

@@ -72,18 +72,30 @@ export class ChatController {
 
   @Get('history')
   @UseGuards(JwtAuthGuard)
-  async history(@Query('sessionId') sessionId: string | undefined, @Req() req: any) {
+  async history(
+    @Query('sessionId') sessionId: string | undefined,
+    @Req() req: any,
+  ) {
     const userId = req.user?.id;
     if (!userId) {
       throw new BadRequestException('User ID not found in token');
     }
     if (sessionId) {
-      const isOwner = await this.chatService.verifySessionOwner(sessionId, userId);
+      const isOwner = await this.chatService.verifySessionOwner(
+        sessionId,
+        userId,
+      );
       if (!isOwner) {
-        throw new HttpException('Forbidden session access', HttpStatus.FORBIDDEN);
+        throw new HttpException(
+          'Forbidden session access',
+          HttpStatus.FORBIDDEN,
+        );
       }
     }
-    const messages = await this.chatService.getHistory(sessionId || null, userId);
+    const messages = await this.chatService.getHistory(
+      sessionId || null,
+      userId,
+    );
     return { messages };
   }
 
