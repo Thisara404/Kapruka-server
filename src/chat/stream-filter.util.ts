@@ -26,10 +26,12 @@ const BLOCKED_EVENT_TYPES = new Set([
 
 // thoughtSignature is always nested inside providerMetadata; listed here as
 // an extra guard in case it ever surfaces at the top level.
+// toolCallId is intentionally NOT stripped — the AI SDK's useChat() hook
+// requires it on tool-input-available events for internal schema validation.
+// It is a short random correlation ID and carries no sensitive model internals.
 const STRIPPED_FIELDS = new Set([
   'providerMetadata',
   'thoughtSignature',
-  'toolCallId',
 ]);
 
 export function filterResponseStream(
