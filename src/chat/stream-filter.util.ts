@@ -3,13 +3,15 @@
  * UI Message Stream Protocol before chunks reach the public client.
  *
  * Blocked event types (dropped entirely):
- *   start-step, finish-step       — internal step lifecycle markers
- *   tool-input-start              — leaks toolCallId + thoughtSignature at tool invocation
- *   tool-input-delta              — raw streaming tool arguments
- *   tool-output-available         — raw database/API response payloads
+ *   start-step, finish-step  — internal step lifecycle markers with no UI value
+ *   tool-input-start         — exposes thoughtSignature before the tool fires
+ *   tool-input-delta         — streams raw tool arguments character by character
  *
- * Sensitive fields removed from every passing event:
- *   providerMetadata (+ nested thoughtSignature), toolCallId
+ * Passed through (providerMetadata/thoughtSignature stripped):
+ *   tool-input-available     — needed by useChat() to show tool "calling" state
+ *   tool-output-available    — needed by useChat() to populate product cards/results
+ *   text-start/delta/end     — the actual assistant text
+ *   start, finish            — stream lifecycle markers
  *
  * Stream format handled:
  *   data: {"type":"...", ...}\n   — UI Message Stream (toUIMessageStreamResponse)
@@ -21,7 +23,6 @@ const BLOCKED_EVENT_TYPES = new Set([
   'finish-step',
   'tool-input-start',
   'tool-input-delta',
-  'tool-output-available',
 ]);
 
 // thoughtSignature is always nested inside providerMetadata; listed here as
@@ -29,10 +30,7 @@ const BLOCKED_EVENT_TYPES = new Set([
 // toolCallId is intentionally NOT stripped — the AI SDK's useChat() hook
 // requires it on tool-input-available events for internal schema validation.
 // It is a short random correlation ID and carries no sensitive model internals.
-const STRIPPED_FIELDS = new Set([
-  'providerMetadata',
-  'thoughtSignature',
-]);
+const STRIPPED_FIELDS = new Set(['providerMetadata', 'thoughtSignature']);
 
 export function filterResponseStream(
   inputStream: ReadableStream<Uint8Array>,
