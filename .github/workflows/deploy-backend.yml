@@ -42,40 +42,39 @@ jobs:
             --tag "$IMAGE_NAME:${GITHUB_SHA}" \
             .
 
-      - name: Ensure backend deploy directory exists
-        uses: appleboy/ssh-action@v1.2.0
-        with:
-          host: ${{ secrets.VM_HOST }}
-          username: ${{ secrets.VM_USER }}
-          key: ${{ secrets.VM_SSH_KEY }}
-          port: ${{ secrets.VM_PORT || 22 }}
-          script_stop: true
-          script: mkdir -p "${{ env.DEPLOY_DIR }}"
+      - name: Deploy to server
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.VM_SSH_KEY }}
+          SSH_HOST: ${{ secrets.VM_HOST }}
+          SSH_USER: ${{ secrets.VM_USER }}
+          SSH_PORT: ${{ secrets.VM_PORT || '22' }}
+        run: |
+          install -m 600 /dev/null /tmp/deploy_key
+          printf '%s\n' "$SSH_PRIVATE_KEY" > /tmp/deploy_key
 
-      - name: Upload backend compose file
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.VM_HOST }}
-          username: ${{ secrets.VM_USER }}
-          key: ${{ secrets.VM_SSH_KEY }}
-          port: ${{ secrets.VM_PORT || 22 }}
-          source: docker-compose.yml
-          target: ${{ env.DEPLOY_DIR }}
-          overwrite: true
+          SSH_OPTS="-i /tmp/deploy_key -o StrictHostKeyChecking=no -o ConnectTimeout=30 -p ${SSH_PORT}"
+          REMOTE="${SSH_USER}@${SSH_HOST}"
+          DEPLOY_DIR="${{ env.DEPLOY_DIR }}"
 
-      - name: Pull and restart backend
-        uses: appleboy/ssh-action@v1.2.0
-        with:
-          host: ${{ secrets.VM_HOST }}
-          username: ${{ secrets.VM_USER }}
-          key: ${{ secrets.VM_SSH_KEY }}
-          port: ${{ secrets.VM_PORT || 22 }}
-          envs: IMAGE_NAME
-          script_stop: true
-          script: |
+          # Ensure deploy directory exists and upload compose file
+          ssh ${SSH_OPTS} "${REMOTE}" "mkdir -p '${DEPLOY_DIR}'"
+          scp -i /tmp/deploy_key -o StrictHostKeyChecking=no -P "${SSH_PORT}" \
+              docker-compose.yml "${REMOTE}:${DEPLOY_DIR}/docker-compose.yml"
+
+          # Pull image on the runner (which has GHCR access), then stream it to
+          # the VM over the existing SSH pipe. The VM never contacts ghcr.io.
+          docker pull "${IMAGE_NAME}:latest"
+          docker save "${IMAGE_NAME}:latest" | gzip | \
+            ssh ${SSH_OPTS} "${REMOTE}" 'gzip -d | docker load'
+
+          # Restart the container; IMAGE_NAME is expanded here on the runner,
+          # so the remote shell receives the literal resolved value.
+          ssh ${SSH_OPTS} "${REMOTE}" "
             set -eu
-            cd "${{ env.DEPLOY_DIR }}"
-            printf 'BACKEND_IMAGE=%s\n' "$IMAGE_NAME:latest" > .image.env
-            docker compose --env-file .image.env pull
+            cd '${DEPLOY_DIR}'
+            printf 'BACKEND_IMAGE=%s\n' '${IMAGE_NAME}:latest' > .image.env
             docker compose --env-file .image.env up -d --remove-orphans
             docker image prune -f
+          "
+
+          rm -f /tmp/deploy_key
