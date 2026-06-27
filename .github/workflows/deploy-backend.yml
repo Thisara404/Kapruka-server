@@ -49,10 +49,14 @@ jobs:
           SSH_USER: ${{ secrets.VM_USER }}
           SSH_PORT: ${{ secrets.VM_PORT || '22' }}
         run: |
+          set -euo pipefail
+
           install -m 600 /dev/null /tmp/deploy_key
           printf '%s\n' "$SSH_PRIVATE_KEY" > /tmp/deploy_key
 
-          SSH_OPTS="-i /tmp/deploy_key -o StrictHostKeyChecking=no -o ConnectTimeout=30 -p ${SSH_PORT}"
+          # ServerAliveInterval keeps the long-running docker load pipe from
+          # being killed by SSH idle timeouts on the VM or intermediate firewalls.
+          SSH_OPTS="-i /tmp/deploy_key -o StrictHostKeyChecking=no -o ConnectTimeout=30 -o ServerAliveInterval=30 -o ServerAliveCountMax=20 -p ${SSH_PORT}"
           REMOTE="${SSH_USER}@${SSH_HOST}"
           DEPLOY_DIR="${{ env.DEPLOY_DIR }}"
 
@@ -61,14 +65,21 @@ jobs:
           scp -i /tmp/deploy_key -o StrictHostKeyChecking=no -P "${SSH_PORT}" \
               docker-compose.yml "${REMOTE}:${DEPLOY_DIR}/docker-compose.yml"
 
-          # Pull image on the runner (which has GHCR access), then stream it to
-          # the VM over the existing SSH pipe. The VM never contacts ghcr.io.
-          docker pull "${IMAGE_NAME}:latest"
-          docker save "${IMAGE_NAME}:latest" | gzip | \
-            ssh ${SSH_OPTS} "${REMOTE}" 'gzip -d | docker load'
+          # --platform linux/amd64 pulls only the single-arch manifest, not the
+          # attestation-bearing manifest list. docker save on a manifest list can
+          # silently produce an empty/partial stream with older buildx images,
+          # which causes docker load on the VM to receive EOF from the daemon.
+          docker pull --platform linux/amd64 "${IMAGE_NAME}:latest"
 
-          # Restart the container; IMAGE_NAME is expanded here on the runner,
-          # so the remote shell receives the literal resolved value.
+          # Stream image via SSH. -C enables SSH-level compression (replaces the
+          # manual gzip|ssh|gzip-d pipe which hid docker save errors and added a
+          # second failure point). pipefail above ensures docker save failures
+          # are caught rather than silently piped as empty streams.
+          docker save "${IMAGE_NAME}:latest" | \
+            ssh -C ${SSH_OPTS} "${REMOTE}" 'docker load'
+
+          # Restart the container; IMAGE_NAME is expanded on the runner so the
+          # remote shell receives the literal resolved value.
           ssh ${SSH_OPTS} "${REMOTE}" "
             set -eu
             cd '${DEPLOY_DIR}'
