@@ -294,6 +294,74 @@ function trimSearchResult(result: any): any {
   return result;
 }
 
+/**
+ * Builds a realistic sample tracking payload (in the kapruka_track_order JSON
+ * schema) for demo/test order numbers, so the tracking card can be exercised
+ * end-to-end without a real, paid Kapruka order. Shaped exactly like the live
+ * MCP response: flat `delivery_date`, `progress[]`, `recipient.address/city`,
+ * and `items[].selling_price`.
+ */
+function buildMockTrackingResult(orderNumber: string): Record<string, any> {
+  const fmt = (d: Date) =>
+    d.toLocaleString('en-US', {
+      timeZone: 'Asia/Colombo',
+      dateStyle: 'medium',
+      timeStyle: 'short',
+    });
+  const now = new Date();
+  const minus = (h: number) => new Date(now.getTime() - h * 3600 * 1000);
+  const plus = (h: number) => new Date(now.getTime() + h * 3600 * 1000);
+
+  return {
+    order_number: orderNumber,
+    pnref: '100' + Math.abs(hashString(orderNumber)).toString().slice(0, 7),
+    status: 'shipped',
+    status_display: 'In Transit',
+    order_date: fmt(minus(52)),
+    delivery_date: fmt(plus(20)),
+    shipped_date: fmt(minus(6)),
+    amount: '7600.00',
+    payment_method: 'Visa / MasterCard',
+    comments: null,
+    recipient: {
+      name: 'Nimal Perera',
+      phone: '+94 77 123 4567',
+      address: '42 Galle Road',
+      city: 'Colombo 03',
+    },
+    greeting_message: 'Happy Birthday! 🎂',
+    special_instructions: null,
+    progress: [
+      { step: 'Order Received', timestamp: fmt(minus(52)) },
+      { step: 'Payment Confirmed', timestamp: fmt(minus(50)) },
+      { step: 'Packed', timestamp: fmt(minus(12)) },
+      { step: 'Shipped', timestamp: fmt(minus(6)) },
+      { step: 'Out for Delivery', timestamp: fmt(plus(20)) },
+    ],
+    live_tracking_available: false,
+    has_delivery_video: false,
+    has_delivery_photo: false,
+    items: [
+      {
+        product_id: 'CHOCOLATES001937',
+        name: 'Java Cinnamon 10 Pieces Chocolate Box',
+        quantity: 2,
+        selling_price: 3800,
+      },
+    ],
+    is_mock: true,
+  };
+}
+
+function hashString(value: string): number {
+  let hash = 0;
+  for (let i = 0; i < value.length; i++) {
+    hash = (hash << 5) - hash + value.charCodeAt(i);
+    hash |= 0;
+  }
+  return hash;
+}
+
 const PURCHASE_INTENT_PATTERNS = [
   /\bgive (them|those|me those|me them|me all|them all)\b/i,
   /\bi('ll| will) take (them|those|all|it)\b/i,
@@ -1602,11 +1670,12 @@ Text: "${text}"`;
       messages: any[];
       sessionId: string;
       cartItems?: { name: string; qty: number; price?: number }[];
+      wishlistItems?: { name: string; price?: number }[];
     },
     ipAddress: string,
     userId?: string,
   ): Promise<any> {
-    const { messages, sessionId, cartItems } = body;
+    const { messages, sessionId, cartItems, wishlistItems } = body;
 
     if (!messages || !Array.isArray(messages) || messages.length === 0) {
       throw new BadRequestException('Messages are required');
@@ -1822,6 +1891,19 @@ Text: "${text}"`;
         })
         .join('\n');
       promptOptions.cartContext = cartLines;
+    }
+
+    // 1b. Wishlist context — inject if frontend sent non-empty wishlistItems
+    if (Array.isArray(wishlistItems) && wishlistItems.length > 0) {
+      const wishlistLines = wishlistItems
+        .map((item) => {
+          const price = item.price
+            ? ` (Rs. ${item.price.toLocaleString()})`
+            : '';
+          return `- ${item.name}${price}`;
+        })
+        .join('\n');
+      promptOptions.wishlistContext = wishlistLines;
     }
 
     // 2. Known delivery date — scan all user messages for temporal references
@@ -2394,6 +2476,36 @@ Text: "${text}"`;
                 const orderNumber = (args.order_number ||
                   args.orderNumber ||
                   '') as string;
+
+                // ── Mock/demo tracking ───────────────────────────────────────
+                // Real tracking requires a Kapruka order number emailed AFTER
+                // payment, so there is no way to demo it in development. Any order
+                // number beginning with DEMO / TEST / MOCK (case-insensitive)
+                // short-circuits to a realistic sample payload so the tracking
+                // card can be exercised end-to-end without a live order.
+                if (/^(demo|test|mock)/i.test(orderNumber.trim())) {
+                  this.logger.log(
+                    `[Tool] kapruka_track_order: returning MOCK tracking for "${orderNumber}"`,
+                  );
+                  const result = buildMockTrackingResult(orderNumber.trim());
+                  if (sessionId) {
+                    this.analyticsService
+                      .logEvent({
+                        sessionId,
+                        userId,
+                        ipAddress,
+                        eventName: 'track_order',
+                        metadata: {
+                          orderNumber,
+                          status: result.status_display,
+                          mock: true,
+                        },
+                      })
+                      .catch(() => {});
+                  }
+                  return result;
+                }
+
                 const params: Record<string, any> = {
                   order_number: orderNumber,
                   response_format: 'json',

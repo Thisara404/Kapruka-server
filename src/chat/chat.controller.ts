@@ -28,6 +28,7 @@ export class ChatController {
       messages: any[];
       sessionId: string;
       cartItems?: { name: string; qty: number; price?: number }[];
+      wishlistItems?: { name: string; price?: number }[];
     },
     @Req() req: any,
     @Res() res: Response,

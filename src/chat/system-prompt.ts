@@ -263,6 +263,7 @@ If the user writes in Sinhala, greet in Sinhala:
 
 export interface SystemPromptOptions {
   cartContext?: string;
+  wishlistContext?: string;
   knownDate?: string;
   detectedLanguage?: 'sinhala' | 'singlish' | 'tanglish';
 }
@@ -297,7 +298,11 @@ export function getSystemPrompt(options?: SystemPromptOptions): string {
   }
 
   if (options?.cartContext) {
-    contextBlock += `\n## [CART CONTEXT] — User's current cart (DO NOT search for more products; proceed to checkout)\n${options.cartContext}\n`;
+    contextBlock += `\n## [CART CONTEXT] — Items the user has ALREADY added to their cart\n${options.cartContext}\n- When the user refers to "my cart", "the products I added", "items in my cart", "what I picked", etc., these are EXACTLY the items above. Do NOT search again — use this list directly to summarize, check delivery, or proceed to checkout.\n`;
+  }
+
+  if (options?.wishlistContext) {
+    contextBlock += `\n## [WISHLIST CONTEXT] — Items the user has saved to their wishlist (favourites)\n${options.wishlistContext}\n- When the user refers to "my wishlist", "my favourites", "the items I saved/liked", etc., these are EXACTLY the items above. Use this list directly; do NOT search again. The wishlist is separate from the cart — only move items to the cart or checkout when the user explicitly asks.\n`;
   }
 
   return THISARI_SYSTEM_PROMPT + contextBlock;
