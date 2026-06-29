@@ -262,8 +262,9 @@ If the user writes in Sinhala, greet in Sinhala:
 `;
 
 export interface SystemPromptOptions {
-  cartContext?: string; // e.g. "1x Chocolate Cake (Rs. 2,500), 2x Red Roses (Rs. 1,200)"
-  knownDate?: string; // e.g. "2026-06-30 (tomorrow)" — already established in conversation
+  cartContext?: string;
+  knownDate?: string;
+  detectedLanguage?: 'sinhala' | 'singlish' | 'tanglish';
 }
 
 export function getSystemPrompt(options?: SystemPromptOptions): string {
@@ -287,6 +288,12 @@ export function getSystemPrompt(options?: SystemPromptOptions): string {
 
   if (options?.knownDate) {
     contextBlock += `- **KNOWN DELIVERY DATE (already provided by user — DO NOT ask again):** ${options.knownDate}\n`;
+  }
+
+  if (options?.detectedLanguage === 'sinhala') {
+    contextBlock += `\n## LANGUAGE DIRECTIVE — HIGHEST PRIORITY OVERRIDE\nThe user wrote in **Native Sinhala Script (සිංහල)**. You MUST write your ENTIRE response in **Native Sinhala Unicode Script (සිංහල)**. Every word, sentence, and paragraph must be in Sinhala characters. The ONLY English permitted inline is: product names, brand names, prices (e.g. Rs. 3,500), product IDs, and numeric values. Do NOT write any full English sentences or paragraphs whatsoever.\n`;
+  } else if (options?.detectedLanguage === 'singlish') {
+    contextBlock += `\n## LANGUAGE DIRECTIVE — HIGHEST PRIORITY OVERRIDE\nThe user wrote in **Singlish** (Romanized Sinhala). You MUST write your ENTIRE response in **Native Sinhala Unicode Script (සිංහල)**. Do NOT respond in Singlish, Romanized text, or English. Every word must use proper Sinhala Unicode characters. The ONLY English permitted inline is: product names, brand names, prices (e.g. Rs. 3,500), product IDs, and numeric values.\n`;
   }
 
   if (options?.cartContext) {

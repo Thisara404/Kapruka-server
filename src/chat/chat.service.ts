@@ -1483,16 +1483,13 @@ Text: "${text}"`;
     let buffer = '';
     let sentenceBuffer = '';
 
-    const processText = async (englishText: string): Promise<string> => {
-      let resultText = englishText;
-      resultText = this.sanitizeIdentity(resultText);
-      if (
-        targetLang === 'sinhala' ||
-        targetLang === 'singlish' ||
-        targetLang === 'tanglish'
-      ) {
+    const processText = async (text: string): Promise<string> => {
+      let resultText = this.sanitizeIdentity(text);
+      // Sinhala/Singlish: AI is instructed to generate Sinhala directly via system prompt.
+      // No translateOutput call needed — avoids the per-sentence API round-trip delay.
+      if (targetLang === 'tanglish') {
         this.logger.log(
-          `Stream translation start: "${englishText.substring(0, 40).replace(/\n/g, ' ')}..."`,
+          `Stream translation start: "${text.substring(0, 40).replace(/\n/g, ' ')}..."`,
         );
         resultText = await this.translateOutput(resultText, targetLang);
         this.logger.log(
@@ -1529,11 +1526,8 @@ Text: "${text}"`;
                 try {
                   const textChunk = JSON.parse(line.substring(2));
 
-                  if (
-                    targetLang === 'sinhala' ||
-                    targetLang === 'singlish' ||
-                    targetLang === 'tanglish'
-                  ) {
+                  if (targetLang === 'tanglish') {
+                    // Sentence-buffer tanglish so translateOutput gets complete sentences
                     sentenceBuffer += textChunk;
                     if (/[.!?\n]/.test(textChunk)) {
                       const toProcess = sentenceBuffer;
@@ -1544,6 +1538,7 @@ Text: "${text}"`;
                       );
                     }
                   } else {
+                    // English, Sinhala, Singlish: stream each chunk directly
                     const processed = await processText(textChunk);
                     controller.enqueue(
                       encoder.encode(`0:${JSON.stringify(processed)}\n`),
@@ -1835,7 +1830,13 @@ Text: "${text}"`;
       promptOptions.knownDate = knownDate;
     }
 
-    // 3. Purchase-intent detection — if user is saying "give them to me" etc.,
+    // 3. Detected language — inject LANGUAGE DIRECTIVE so AI responds directly in Sinhala/Singlish
+    //    This bypasses the slow translateOutput pipeline for sinhala/singlish responses
+    if (targetLang === 'sinhala' || targetLang === 'singlish') {
+      promptOptions.detectedLanguage = targetLang;
+    }
+
+    // 4. Purchase-intent detection — if user is saying "give them to me" etc.,
     //    log it so the AI gets the enriched system prompt context
     const purchaseIntentDetected = hasPurchaseIntent(sanitizedContent);
     if (purchaseIntentDetected) {
@@ -2436,11 +2437,7 @@ Text: "${text}"`;
                           const originalEnglish = msg.content;
                           let processedText =
                             this.sanitizeIdentity(originalEnglish);
-                          if (
-                            targetLang === 'sinhala' ||
-                            targetLang === 'singlish' ||
-                            targetLang === 'tanglish'
-                          ) {
+                          if (targetLang === 'tanglish') {
                             processedText = await this.translateOutput(
                               processedText,
                               targetLang,
@@ -2464,11 +2461,7 @@ Text: "${text}"`;
                               const originalEnglish = part.text;
                               let processedText =
                                 this.sanitizeIdentity(originalEnglish);
-                              if (
-                                targetLang === 'sinhala' ||
-                                targetLang === 'singlish' ||
-                                targetLang === 'tanglish'
-                              ) {
+                              if (targetLang === 'tanglish') {
                                 processedText = await this.translateOutput(
                                   processedText,
                                   targetLang,
