@@ -23,7 +23,13 @@ export class ChatController {
   @Post()
   @UseGuards(OptionalJwtAuthGuard)
   async chat(
-    @Body() body: { messages: any[]; sessionId: string },
+    @Body()
+    body: {
+      messages: any[];
+      sessionId: string;
+      cartItems?: { name: string; qty: number; price?: number }[];
+      wishlistItems?: { name: string; price?: number }[];
+    },
     @Req() req: any,
     @Res() res: Response,
   ) {
