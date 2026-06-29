@@ -19,7 +19,7 @@ import { SessionStatus } from '../database/enums/session-status.enum.js';
 import { AnalyticsService } from '../analytics/analytics.service.js';
 import { callMcpTool } from './mcp-client.js';
 import { filterResponseStream } from './stream-filter.util.js';
-import { getSystemPrompt } from './system-prompt.js';
+import { getSystemPrompt, type SystemPromptOptions } from './system-prompt.js';
 import { checkRateLimit } from './rate-limiter.js';
 import {
   KAPRUKA_VOICE_TOOL_NAMES,
@@ -292,6 +292,179 @@ function trimSearchResult(result: any): any {
   }
 
   return result;
+}
+
+const PURCHASE_INTENT_PATTERNS = [
+  /\bgive (them|those|me those|me them|me all|them all)\b/i,
+  /\bi('ll| will) take (them|those|all|it)\b/i,
+  /\bi want (them|those|all of them|all of those|to (buy|order|purchase) (them|those))\b/i,
+  /\bi('ll| will) have (them|those|all)\b/i,
+  /\bi('ll| will) go with (those|them|that)\b/i,
+  /\border (them|those|now|all)\b/i,
+  /\bplace (the )?order\b/i,
+  /\bbook (them|those|all)\b/i,
+  /\b(proceed|go ahead|let'?s (do it|go|order|buy|get them))\b/i,
+  /\b(yes,? ?I want (those|them|these|all))\b/i,
+  /\bthose ones please\b/i,
+  /\bhow (do|can) I (buy|order|get|purchase) (them|those|these)\b/i,
+  /\bready to (order|buy|checkout|check ?out|purchase)\b/i,
+  /\bwant to (buy|order|purchase) (them|those|these|all)\b/i,
+];
+
+/** Returns true when the user message clearly signals purchase/checkout intent. */
+function hasPurchaseIntent(text: string): boolean {
+  const lower = text.toLowerCase().trim();
+  return PURCHASE_INTENT_PATTERNS.some((re) => re.test(lower));
+}
+
+/**
+ * Scans user messages in the conversation for temporal delivery-date references.
+ * Returns a human-readable date string if found (e.g. "2026-06-30 (tomorrow)"),
+ * so the system prompt can tell the AI not to ask for the date again.
+ */
+function extractKnownDeliveryDate(messages: any[]): string | null {
+  const now = new Date();
+  const sriLankaOffset = 5.5 * 60 * 60 * 1000; // UTC+5:30
+  const slNow = new Date(now.getTime() + sriLankaOffset);
+
+  const toISO = (d: Date) => d.toISOString().slice(0, 10);
+  const fmt = (d: Date, label: string) => `${toISO(d)} (${label})`;
+
+  const DAY_NAMES = [
+    'sunday',
+    'monday',
+    'tuesday',
+    'wednesday',
+    'thursday',
+    'friday',
+    'saturday',
+  ];
+
+  let foundDate: string | null = null;
+
+  // Only scan user-role messages
+  for (const msg of messages) {
+    if (msg.role !== 'user') continue;
+
+    let text = '';
+    if (typeof msg.content === 'string') {
+      text = msg.content;
+    } else if (Array.isArray(msg.parts)) {
+      text = msg.parts
+        .filter((p: any) => p?.type === 'text')
+        .map((p: any) => p.text)
+        .join(' ');
+    } else if (Array.isArray(msg.content)) {
+      text = msg.content
+        .filter((p: any) => p?.type === 'text')
+        .map((p: any) => p.text)
+        .join(' ');
+    }
+    if (!text) continue;
+
+    const lower = text.toLowerCase();
+
+    // Skip structured form-submitted messages — they already contain resolved dates
+    if (
+      /^(city:|product:|delivery date:|recipient name:|phone:)/im.test(text)
+    ) {
+      // Extract the resolved date from a form submission
+      const dateMatch = /delivery date:\s*(.+)/im.exec(text);
+      if (dateMatch) {
+        foundDate = dateMatch[1].trim();
+      }
+      continue;
+    }
+
+    if (/\btomorrow\b/i.test(lower)) {
+      const d = new Date(slNow);
+      d.setUTCDate(d.getUTCDate() + 1);
+      foundDate = fmt(d, 'tomorrow');
+    } else if (/\btoday\b/i.test(lower)) {
+      foundDate = fmt(slNow, 'today');
+    } else if (/\bthis weekend\b/i.test(lower)) {
+      const d = new Date(slNow);
+      const dow = d.getUTCDay(); // 0=Sun
+      const daysToSat = (6 - dow + 7) % 7 || 7;
+      d.setUTCDate(d.getUTCDate() + daysToSat);
+      foundDate = fmt(d, 'this Saturday');
+    } else {
+      // Named day: "this Saturday", "next Monday", "on Friday" etc.
+      const dayMatch =
+        /\b(?:this |next |on )?(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i.exec(
+          lower,
+        );
+      if (dayMatch) {
+        const targetDay = DAY_NAMES.indexOf(dayMatch[1].toLowerCase());
+        const d = new Date(slNow);
+        const currentDay = d.getUTCDay();
+        const diff = (targetDay - currentDay + 7) % 7 || 7;
+        d.setUTCDate(d.getUTCDate() + diff);
+        foundDate = fmt(d, dayMatch[0].trim());
+      }
+
+      // ISO date literal
+      const isoMatch = /\b(\d{4}-\d{2}-\d{2})\b/.exec(text);
+      if (isoMatch) {
+        foundDate = isoMatch[1];
+      }
+
+      // Verbal date: "June 30", "30th June" etc.
+      const MONTHS: Record<string, number> = {
+        jan: 0,
+        january: 0,
+        feb: 1,
+        february: 1,
+        mar: 2,
+        march: 2,
+        apr: 3,
+        april: 3,
+        may: 4,
+        jun: 5,
+        june: 5,
+        jul: 6,
+        july: 6,
+        aug: 7,
+        august: 7,
+        sep: 8,
+        september: 8,
+        oct: 9,
+        october: 9,
+        nov: 10,
+        november: 10,
+        dec: 11,
+        december: 11,
+      };
+      const verbalMatch =
+        /\b(\d{1,2})(?:st|nd|rd|th)?\s+(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b/i.exec(
+          lower,
+        ) ||
+        /\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(\d{1,2})(?:st|nd|rd|th)?\b/i.exec(
+          lower,
+        );
+
+      if (verbalMatch) {
+        const isMonthFirst = isNaN(Number(verbalMatch[1]));
+        const day = parseInt(
+          isMonthFirst ? verbalMatch[2] : verbalMatch[1],
+          10,
+        );
+        const monthKey = (isMonthFirst ? verbalMatch[1] : verbalMatch[2])
+          .replace(/\./g, '')
+          .toLowerCase()
+          .slice(0, 3);
+        const month = MONTHS[monthKey] ?? MONTHS[monthKey.slice(0, 3)];
+        if (month !== undefined && day >= 1 && day <= 31) {
+          const d = new Date(slNow);
+          d.setUTCMonth(month, day);
+          if (d < slNow) d.setUTCFullYear(d.getUTCFullYear() + 1); // next year if past
+          foundDate = toISO(d);
+        }
+      }
+    }
+  }
+
+  return foundDate;
 }
 
 /**
@@ -1430,11 +1603,15 @@ Text: "${text}"`;
   }
 
   async handleChat(
-    body: { messages: any[]; sessionId: string },
+    body: {
+      messages: any[];
+      sessionId: string;
+      cartItems?: { name: string; qty: number; price?: number }[];
+    },
     ipAddress: string,
     userId?: string,
   ): Promise<any> {
-    const { messages, sessionId } = body;
+    const { messages, sessionId, cartItems } = body;
 
     if (!messages || !Array.isArray(messages) || messages.length === 0) {
       throw new BadRequestException('Messages are required');
@@ -1636,6 +1813,37 @@ Text: "${text}"`;
     // the last pagination cursor for each query string.
     const searchContext = extractSearchContext(converted);
 
+    // ── Build dynamic system prompt options ─────────────────────────────────
+    const promptOptions: SystemPromptOptions = {};
+
+    // 1. Cart context — inject if frontend sent non-empty cartItems
+    if (Array.isArray(cartItems) && cartItems.length > 0) {
+      const cartLines = cartItems
+        .map((item) => {
+          const price = item.price
+            ? ` (Rs. ${item.price.toLocaleString()})`
+            : '';
+          return `- ${item.qty}x ${item.name}${price}`;
+        })
+        .join('\n');
+      promptOptions.cartContext = cartLines;
+    }
+
+    // 2. Known delivery date — scan all user messages for temporal references
+    const knownDate = extractKnownDeliveryDate(messages);
+    if (knownDate) {
+      promptOptions.knownDate = knownDate;
+    }
+
+    // 3. Purchase-intent detection — if user is saying "give them to me" etc.,
+    //    log it so the AI gets the enriched system prompt context
+    const purchaseIntentDetected = hasPurchaseIntent(sanitizedContent);
+    if (purchaseIntentDetected) {
+      this.logger.log(
+        `[Intent] Purchase intent detected in: "${sanitizedContent.slice(0, 80)}"`,
+      );
+    }
+
     // Save initial message history
     if (sessionId) {
       await this.findOrCreateSession(sessionId, userId);
@@ -1646,7 +1854,8 @@ Text: "${text}"`;
       ).catch(() => {});
     }
 
-    const tokenCount = this.estimateTokenCount(converted, getSystemPrompt());
+    const systemPrompt = getSystemPrompt(promptOptions);
+    const tokenCount = this.estimateTokenCount(converted, systemPrompt);
     const groqModel =
       tokenCount > 12000 ? 'llama-3.1-8b-instant' : 'llama-3.3-70b-versatile';
 
@@ -1675,7 +1884,7 @@ Text: "${text}"`;
         );
         const result = streamText({
           model: getModelInstance(modelName),
-          system: getSystemPrompt(),
+          system: systemPrompt,
           messages: converted,
           temperature: 0,
           maxRetries: isFallbackModel(modelName) ? 1 : 2,
@@ -2146,7 +2355,7 @@ Text: "${text}"`;
                   params,
                 });
 
-                if (sessionId && result) {
+                if (sessionId && result?.order_ref && result?.checkout_url) {
                   this.analyticsService
                     .logOrder({
                       sessionId,
@@ -2657,7 +2866,7 @@ Text: "${text}"`;
       );
     }
 
-    if (result.checkout_url) {
+    if (result.order_ref && result.checkout_url) {
       // Persist a synthetic confirmation message into conversation history
       if (sessionId) {
         await this.findOrCreateSession(sessionId, userId);
